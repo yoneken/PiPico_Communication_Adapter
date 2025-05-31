@@ -1,0 +1,6 @@
+[submodule "can2040"]
+	path = can2040
+	url = git@github.com:KevinOConnor/can2040.git
+[submodule "modbus"]
+	path = modbus
+	url = git@github.com:alejoseb/Modbus-PI-Pico-FreeRTOS.git
