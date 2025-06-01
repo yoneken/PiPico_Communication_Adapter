@@ -103,4 +103,4 @@ target_include_directories(Modbus PUBLIC
 
 pico_add_extra_outputs(PiPico_Communication_Adapter)
 
-target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS pico-cpp Modbus hardware_pio)
+target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus hardware_pio)
