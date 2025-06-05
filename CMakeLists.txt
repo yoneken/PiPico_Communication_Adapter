@@ -54,7 +54,8 @@ target_link_libraries(PiPico_Communication_Adapter
 target_include_directories(PiPico_Communication_Adapter PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         include/
-        ${picoSdk}/sdk/2.1.1/src/rp2_common/hardware_irq/include
+        ${picoSdk}/sdk/2.1.1/src/rp2_common/hardware_irq/include/
+        can2040/src/
 )
 
 add_library(FreeRTOS STATIC
@@ -96,11 +97,18 @@ modbus/MODBUS-LIB/Inc)
 add_library(Modbus STATIC modbus/MODBUS-LIB/Src/Modbus.c)
 target_link_libraries(Modbus pico_stdlib hardware_uart)
 target_include_directories(Modbus PUBLIC
-    modbus/FreeRTOS-Kernel/include
+    modbus/FreeRTOS-Kernel/include/
     include/
-    modbus/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include
-    modbus/MODBUS-LIB/Inc)
+    modbus/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include/
+    modbus/MODBUS-LIB/Inc/)
+
+add_library(Can2040 STATIC can2040/src/can2040.c)
+target_link_libraries(Can2040 pico_stdlib hardware_uart)
+target_include_directories(Can2040 PUBLIC
+can2040/include/
+modbus/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include/
+${picoSdk}/sdk/2.1.1/src/rp2040/hardware_regs/include/)
 
 pico_add_extra_outputs(PiPico_Communication_Adapter)
 
-target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus hardware_pio)
+target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus Can2040 hardware_pio)
