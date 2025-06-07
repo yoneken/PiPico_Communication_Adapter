@@ -46,6 +46,7 @@ Number, Name, Setting range, Unit, Factory setting, Effective time, Register add
 Fn100, enable the gripper, 0-1, -, 0, immediately, 0x0100
 Fn101, control mode, 0-2 0：location 1：speed, -, 0, immediately 0x0101
 Fn109, fault reset, 0-1, -, 0, immediately, 0x0109
+Fn110, calibrate gripper, 0-1, -, 0, immediately, 0x0110
 
 Fn2xx Gain Parameters
 Fn200, position loop gain, 10-20000, 0.1Hz, 200, immediately, 0x0200
@@ -88,11 +89,25 @@ Fn806, rated voltage, 1-6000, 0.01V, 2400, effective after power on, 0x0806
 Fn807, rated current, 1-2400, 0.01A, 800, effective after power on, 0x0807
 */
 
-static struct can2040 cbus;
+enum { REG_ENABLE=0x100, REG_MODE=0x101, REG_FAULT_RESET=0x109, REG_CALIBRATE=0x110, REG_SET_SPEED=0x303, REG_SET_POSITION=0x700 };
 
+enum { DISABLE=0, ENABLE };
+enum { MODE_POSITION=0, MODE_SPEED };
+enum { OPERATION=0, FAULT_RESET };
+enum { CALIBRATED=0, CALIBRATING, NOT_CALIBRATED_YET };
+
+volatile uint8_t enable_gripper = DISABLE;
+volatile uint8_t control_mode = MODE_POSITION;
+volatile uint8_t fault_reset = OPERATION;
+volatile uint8_t calibrated = NOT_CALIBRATED_YET;
+volatile uint16_t target_speed = 1500;
+volatile uint32_t target_position = 0;
+
+static struct can2040 cbus;
 static void can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *msg)
 {
     printf("Core %u: Can Receive ID %d :(%d) %d\n", get_core_num(), (msg->id >> 7) & 0xF, (msg->id >> 1) & 0x3F, msg->dlc);
+    xSemaphoreGive(CanTxSphrHandle);
 }
 
 static void PIOx_IRQHandler(void)
@@ -116,45 +131,60 @@ SemaphoreHandle_t CanTxSphrHandle = NULL;
 void vTaskCanTransmit( void * pvParameters )
 {
     can2040_msg send_respond_encoder_data_msg;
-    send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1); // 0 is the slave address, 61 is the function code
-    send_respond_encoder_data_msg.dlc = 5; // Data Length Code
-    send_respond_encoder_data_msg.data[0] = 0x0A;
-    send_respond_encoder_data_msg.data[1] = 0x14;
-    send_respond_encoder_data_msg.data[2] = 0x01;
-    send_respond_encoder_data_msg.data[3] = 0xF4;
-    send_respond_encoder_data_msg.data[4] = 0xC0;
     int result = 0;
     for(;;)
     {
-        if(xSemaphoreTake(CanTxSphrHandle , portMAX_DELAY) == pdTRUE){
-            switch (flag) {
-                case 0:
-                    // Calibration
-                    send_respond_encoder_data_msg.id = (0 << 7) | (62 << 1);
-                    send_respond_encoder_data_msg.dlc = 0;
-                    flag = 1;
-                    break;
-                case 1:
-                    send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1);
-                    send_respond_encoder_data_msg.dlc = 5;
-                    send_respond_encoder_data_msg.data[0] = 0x64;
-                    flag = 2;
-                    break;
-                case 2:
-                    send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1);
-                    send_respond_encoder_data_msg.dlc = 5;
-                    send_respond_encoder_data_msg.data[0] = 0x0A;
-                    flag = 3;
-                    break;
-                case 3:
-                    send_respond_encoder_data_msg.id = (0 << 7) | (28 << 1) | CAN2040_ID_RTR;
-                    send_respond_encoder_data_msg.dlc = 0;
-                    flag = 0;
-                    break;
+        if(xSemaphoreTake(CanTxSphrHandle , 200) == pdTRUE){
+            if(enable_gripper != ModbusDATA[REG_ENABLE]){
+                if(enable_gripper == ENABLE){
+                    uint8_t position = 255 * (ModbusDATA[REG_SET_POSITION] << 8) | ModbusDATA[REG_SET_POSITION+1] / 0xFFFFFFFF;
+                    uint8_t speed = 255 * (ModbusDATA[REG_SET_SPEED] << 8) | ModbusDATA[REG_SET_SPEED+1] / 20000;
+
+                    if(calibrated == NOT_CALIBRATED_YET){
+                        // If not calibrated, send calibration command first
+                        send_respond_encoder_data_msg.id = (0 << 7) | (62 << 1); // 0 is the slave address, 62 is the function code
+                        send_respond_encoder_data_msg.dlc = 0; // Data Length Code
+                        calibrated = CALIBRATING;
+                    }else if(calibrated == CALIBRATED){
+                        if ((target_position != position) || (target_speed != speed)) {
+                            if(control_mode == MODE_POSITION){
+                                send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1); // 0 is the slave address, 61 is the function code
+                                send_respond_encoder_data_msg.dlc = 5; // Data Length Code
+                                send_respond_encoder_data_msg.data[0] = position;
+                                send_respond_encoder_data_msg.data[1] = speed;
+                                send_respond_encoder_data_msg.data[2] = 0x01;
+                                send_respond_encoder_data_msg.data[3] = 0xF4;
+                                send_respond_encoder_data_msg.data[4] = 0xC0;
+                            }else if(control_mode == MODE_SPEED){
+                                send_respond_encoder_data_msg.id = (0 << 7) | (2 << 1); // 0 is the slave address, 2 is the function code
+                                send_respond_encoder_data_msg.dlc = 6; // Data Length Code
+                                send_respond_encoder_data_msg.data[0] = speed;
+                                send_respond_encoder_data_msg.data[1] = 0;
+                                send_respond_encoder_data_msg.data[2] = 0;
+                                send_respond_encoder_data_msg.data[3] = 0x00;
+                                send_respond_encoder_data_msg.data[4] = 0x00;
+                                send_respond_encoder_data_msg.data[5] = 0x00;
+                            }
+                        }else{
+                            // If the position and speed are the same, just send a request for encoder data
+                            send_respond_encoder_data_msg.id = (0 << 7) | (28 << 1) | CAN2040_ID_RTR;
+                            send_respond_encoder_data_msg.dlc = 0;
+                        }
+                    }
+                }else{
+                    // Disable the gripper
+                    send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1); // 0 is the slave address, 61 is the function code
+                    send_respond_encoder_data_msg.dlc = 5; // Data Length Code
+                    send_respond_encoder_data_msg.data[0] = 0;
+                    send_respond_encoder_data_msg.data[1] = 0;
+                    send_respond_encoder_data_msg.data[2] = 0;
+                    send_respond_encoder_data_msg.data[3] = 0;
+                    send_respond_encoder_data_msg.data[4] = 0;
+                }
+
+                result = can2040_transmit(&cbus, &send_respond_encoder_data_msg);
+                printf("Core %u: CanTransmit %d\n", get_core_num(), result;
             }
-            result = can2040_transmit(&cbus, &send_respond_encoder_data_msg);
-            printf("Core %u: CanTransmit %d %d\n", get_core_num(), result, counter++);
-            xSemaphoreGive(CanTxSphrHandle);
         }
         vTaskDelay(10);
     }
@@ -220,9 +250,9 @@ int main()
     ModbusH.port = uart1;
     ModbusH.u8id = 8; // For master it must be 0
     ModbusH.u16timeOut = 1000;
-    // ModbusH.EN_Port = NULL;
-    ModbusH.EN_Port = (uint16_t *) 1; //enables the RS485 ChipSelect
-    ModbusH.EN_Pin = MODBUS_EN_PIN; //Pi controlling RS485 ChipSelect
+    ModbusH.EN_Port = NULL;
+    // ModbusH.EN_Port = (uint16_t *) 1; //enables the RS485 ChipSelect
+    // ModbusH.EN_Pin = MODBUS_EN_PIN; //Pi controlling RS485 ChipSelect
     ModbusH.u16regs = ModbusDATA;
     ModbusH.u16regsize= sizeof(ModbusDATA)/sizeof(ModbusDATA[0]);
     ModbusH.xTypeHW = USART_HW;
