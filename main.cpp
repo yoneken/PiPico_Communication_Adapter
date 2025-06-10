@@ -43,7 +43,7 @@ Monitoring Group
 
 Fn1xx Control Parameters
 Number, Name, Setting range, Unit, Factory setting, Effective time, Register address
-Fn100, enable the gripper, 0-1, -, 0, immediately, 0x0100
+Fn100, activated the gripper, 0-1, -, 0, immediately, 0x0100
 Fn101, control mode, 0-2 0：location 1：speed, -, 0, immediately 0x0101
 Fn109, fault reset, 0-1, -, 0, immediately, 0x0109
 Fn110, calibrate gripper, 0-1, -, 0, immediately, 0x0110
@@ -89,14 +89,17 @@ Fn806, rated voltage, 1-6000, 0.01V, 2400, effective after power on, 0x0806
 Fn807, rated current, 1-2400, 0.01A, 800, effective after power on, 0x0807
 */
 
-enum { REG_TARGET_POSITION=0x004, REG_MOTOR_POSITION=0x006, REG_ENABLE=0x100, REG_MODE=0x101, REG_FAULT_RESET=0x109, REG_CALIBRATE=0x110, REG_SET_SPEED=0x303, REG_SET_POSITION=0x700 };
+enum { REG_TARGET_POSITION=0x004, REG_MOTOR_POSITION=0x006, REG_ACTIVATE=0x100, REG_MODE=0x101, REG_FAULT_RESET=0x109, REG_CALIBRATE=0x110, REG_SET_SPEED=0x303, REG_SET_POSITION=0x700 };
 
-enum { DISABLE=0, ENABLE };
-enum { MODE_POSITION=0, MODE_SPEED };
-enum { OPERATION=0, FAULT_RESET };
+enum { DEACTIVATE=0, ACTIVATE };
+enum { IDLE_AUTO_RELEASE_CALIB=0, GO_TO };
+enum { IN_MOTION=0, DETECTED_CLOSE, DETECTED_OPEN, AT_POSITION };
 enum { NOT_CALIBRATED_YET=0, CALIBRATED, CALIBRATING };
+enum { MODE_POSITION=0, MODE_SPEED };
 
-volatile uint8_t fault_reset = OPERATION;
+volatile uint8_t activated = DEACTIVATE;
+volatile uint8_t action_state = IDLE_AUTO_RELEASE_CALIB;
+volatile uint8_t object_detection = AT_POSITION;
 volatile uint8_t calibrated = NOT_CALIBRATED_YET;
 volatile uint16_t target_speed = 1500;
 volatile uint32_t target_position = 0;
@@ -111,13 +114,11 @@ static void can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *
 
     switch((msg->id >> 1) & 0x3F){
         case 60: //Respond_Gripper_data_pack
-            uint8_t position = msg->data[0];  // Gripper position
-            UBaseType_t uxSavedInterruptStatus = taskENTER_CRITICAL_FROM_ISR();
-            ModbusDATA[REG_MOTOR_POSITION] = position;
-            ModbusDATA[REG_TARGET_POSITION] = target_position;
-            //calibrated = ((msg->data[0] >> 7) & 0x01) == 1 ? CALIBRATED : NOT_CALIBRATED_YET;
-            current_position = position;
-            taskEXIT_CRITICAL_FROM_ISR(uxSavedInterruptStatus);
+            current_position = msg->data[0];
+            activated = msg->data[3] & 0x01;
+            action_state = (msg->data[3] >> 1) & 0x01;
+            object_detection = (msg->data[3] >> 2) & 0x03;
+            calibrated = (msg->data[3] >> 7) & 0x01;
             break;
     }
     xSemaphoreGiveFromISR(CanTxSphrHandle, &xHigherPriorityTaskWoken);
@@ -129,44 +130,28 @@ static void PIOx_IRQHandler(void)
     can2040_pio_irq_handler(&cbus);
 }
 
-void vTaskModbusSlave( void * pvParameters )
+void vTaskSubtask( void * pvParameters )
 {
     for(;;)
     {
-        if(xSemaphoreTake(ModbusH.ModBusSphrHandle , 100) == pdTRUE){
-            if(ModbusDATA[REG_ENABLE] == DISABLE){
-                ModbusDATA[REG_ENABLE] = ENABLE;
-                printf("Motor enabled\n");
-            }else{
-                if(ModbusDATA[REG_SET_POSITION] == 20){
-                    ModbusDATA[REG_SET_POSITION] = 170;
-                    printf("Motor set position to 170\n");
-                }else{
-                    ModbusDATA[REG_SET_POSITION] = 20;
-                    printf("Motor set position to 20\n");
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(4000));
-            xSemaphoreGive(ModbusH.ModBusSphrHandle);
-        }
+        printf("Core %u: %d : %d : %d\n", get_core_num(), current_position, activated, calibrated);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-void vTaskCanTransmit( void * pvParameters )
+void vTaskMessageTranslator( void * pvParameters )
 {
     can2040_msg send_respond_encoder_data_msg;
     int result = 0;
     for(;;)
     {
-        if(xSemaphoreTake(CanTxSphrHandle , 200) == pdTRUE){
-            if(ModbusDATA[REG_ENABLE] == ENABLE){
+        if(xSemaphoreTake(CanTxSphrHandle , 20) == pdTRUE){
+            ModbusDATA[REG_MOTOR_POSITION] = current_position;
+            if(ModbusDATA[REG_ACTIVATE] == ACTIVATE){
                 uint8_t position = 255 * ((ModbusDATA[REG_SET_POSITION] << 8) | ModbusDATA[REG_SET_POSITION+1]) / 0xFFFF;
                 uint8_t speed = 255 * ((ModbusDATA[REG_SET_SPEED] << 8) | ModbusDATA[REG_SET_SPEED+1]) / 20000;
-                //printf("mod pos/vel %d/%d\n", ModbusDATA[REG_SET_POSITION], ModbusDATA[REG_SET_SPEED]);
-                //printf("pos/vel %d/%d\n", position, speed);
 
-                if(calibrated == NOT_CALIBRATED_YET){
-                    // If not calibrated, send calibration command first
+                if(ModbusDATA[REG_CALIBRATE] == 0x01){
                     send_respond_encoder_data_msg.id = (0 << 7) | (62 << 1); // 0 is the slave address, 62 is the function code
                     send_respond_encoder_data_msg.dlc = 0; // Data Length Code
                     calibrated = CALIBRATING;
@@ -199,8 +184,7 @@ void vTaskCanTransmit( void * pvParameters )
                     }
                 }
             }else{
-                if(ModbusDATA[REG_ENABLE] == DISABLE){
-                    // Deactivate the gripper
+                if(ModbusDATA[REG_ACTIVATE] == DEACTIVATE){
                     send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1); // 0 is the slave address, 61 is the function code
                     send_respond_encoder_data_msg.dlc = 5; // Data Length Code
                     send_respond_encoder_data_msg.data[0] = 0;
@@ -215,7 +199,7 @@ void vTaskCanTransmit( void * pvParameters )
                 }
             }
 
-            if((calibrated == NOT_CALIBRATED_YET) && (ModbusDATA[REG_ENABLE] == DISABLE)){
+            if((calibrated == NOT_CALIBRATED_YET) && (ModbusDATA[REG_ACTIVATE] == DEACTIVATE)){
                 // No operation
             }else{
                 result = can2040_transmit(&cbus, &send_respond_encoder_data_msg);
@@ -224,10 +208,9 @@ void vTaskCanTransmit( void * pvParameters )
 
             if(calibrated == CALIBRATING){
                 vTaskDelay(pdMS_TO_TICKS(6000));
-                calibrated = CALIBRATED;
                 ModbusDATA[REG_CALIBRATE] = 0;
             }
-            printf("CanTransmit %d %d\r\n", current_position, calibrated);
+
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
@@ -272,24 +255,32 @@ int main()
     initSerial();
     initCanbus();
 
-    BaseType_t xReturnedModbusSlave, xReturnedCanTransmit;
-    TaskHandle_t xHandleModbusSlave = NULL, xHandleCanTransmit = NULL;
+    BaseType_t xReturnedMessageTranslator, xReturnedSubtask;
+    TaskHandle_t xHandleMessageTranslator = NULL, xHandleSubtask = NULL;
     UBaseType_t uxCoreAffinityMask;
 
-    xReturnedModbusSlave = xTaskCreate(
-                    vTaskModbusSlave,       /* Function that implements the task. */
-                    "Modbus Slave task",    /* Text name for the task. */
+    xReturnedMessageTranslator = xTaskCreate(
+                    vTaskMessageTranslator,       /* Function that implements the task. */
+                    "Message Translator task",    /* Text name for the task. */
                     512,                    /* Stack size in words, not bytes. */
                     ( void * ) 1,           /* Parameter passed into the task. */
                     tskIDLE_PRIORITY,       /* Priority at which the task is created. */
-                    &xHandleModbusSlave );
+                    &xHandleMessageTranslator );
 
 
     // force to run Modbus Slave task on core1
     uxCoreAffinityMask = ( ( 1 << 1 ));
-    vTaskCoreAffinitySet( xHandleModbusSlave, uxCoreAffinityMask );
+    vTaskCoreAffinitySet( xHandleMessageTranslator, uxCoreAffinityMask );
 
-    ModbusDATA[REG_SET_SPEED] = 0x10;
+    xReturnedSubtask = xTaskCreate(
+                    vTaskSubtask,       /* Function that implements the task. */
+                    "Subtask",    /* Text name for the task. */
+                    512,                    /* Stack size in words, not bytes. */
+                    ( void * ) 1,           /* Parameter passed into the task. */
+                    tskIDLE_PRIORITY,       /* Priority at which the task is created. */
+                    &xHandleSubtask );
+
+    ModbusDATA[REG_SET_SPEED] = target_speed * 255 / 20000;
 
     ModbusH.uModbusType = MB_SLAVE;
     ModbusH.port = uart1;
@@ -305,14 +296,6 @@ int main()
     ModbusInit(&ModbusH);
     //Start capturing traffic on serial Port
     ModbusStart(&ModbusH);
-
-    xReturnedCanTransmit = xTaskCreate(
-                    vTaskCanTransmit,
-                    "Can Transmit task",
-                    512,             /* Stack size in words, not bytes. */
-                    ( void * ) 1,    /* Parameter passed into the task. */
-                    tskIDLE_PRIORITY,/* Priority at which the task is created. */
-                    &xHandleCanTransmit );
 
     CanTxSphrHandle = xSemaphoreCreateBinary();
     xSemaphoreGive(CanTxSphrHandle);
