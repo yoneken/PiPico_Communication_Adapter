@@ -94,12 +94,14 @@ enum { REG_TARGET_POSITION=0x004, REG_MOTOR_POSITION=0x006, REG_ACTIVATE=0x100, 
 enum { DEACTIVATE=0, ACTIVATE };
 enum { IDLE_AUTO_RELEASE_CALIB=0, GO_TO };
 enum { IN_MOTION=0, DETECTED_CLOSE, DETECTED_OPEN, AT_POSITION };
+enum { NO_ERROR=0, TEMP_ERROR, TIMEOUT_ERROR, BOTH_ERROR };
 enum { NOT_CALIBRATED_YET=0, CALIBRATED, CALIBRATING };
 enum { MODE_POSITION=0, MODE_SPEED };
 
 volatile uint8_t activated = DEACTIVATE;
 volatile uint8_t action_state = IDLE_AUTO_RELEASE_CALIB;
 volatile uint8_t object_detection = AT_POSITION;
+volatile uint8_t error_state = NO_ERROR;
 volatile uint8_t calibrated = NOT_CALIBRATED_YET;
 volatile uint16_t target_speed = 1500;
 volatile uint32_t target_position = 0;
@@ -118,9 +120,11 @@ static void can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *
             activated = msg->data[3] & 0x01;
             action_state = (msg->data[3] >> 1) & 0x01;
             object_detection = (msg->data[3] >> 2) & 0x03;
+            error_state = (msg->data[3] >> 4) & 0x03;
             calibrated = (msg->data[3] >> 7) & 0x01;
             break;
     }
+
     xSemaphoreGiveFromISR(CanTxSphrHandle, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
@@ -134,7 +138,14 @@ void vTaskSubtask( void * pvParameters )
 {
     for(;;)
     {
-        printf("Core %u: %d : %d : %d\n", get_core_num(), current_position, activated, calibrated);
+        printf("Core %u: %d : %d : %d : %d\n", get_core_num(), current_position, activated, calibrated, error_state);
+        //printf("Core %u: %d : %d\n", get_core_num(), ModbusDATA[REG_ACTIVATE], ModbusDATA[REG_CALIBRATE]);
+        // ModbusDATAの中で値が0x01になっているレジスタを表示
+        //for (int i = 0; i < sizeof(ModbusDATA)/sizeof(ModbusDATA[0]); i++) {
+        //    if (ModbusDATA[i] == 0x01) {
+        //        printf("Core %u: ModbusDATA[0x%04x] = 0x01\n", get_core_num(), i);
+        //    }
+        //}
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -151,7 +162,10 @@ void vTaskMessageTranslator( void * pvParameters )
                 uint8_t position = 255 * ((ModbusDATA[REG_SET_POSITION] << 8) | ModbusDATA[REG_SET_POSITION+1]) / 0xFFFF;
                 uint8_t speed = 255 * ((ModbusDATA[REG_SET_SPEED] << 8) | ModbusDATA[REG_SET_SPEED+1]) / 20000;
 
-                if(ModbusDATA[REG_CALIBRATE] == 0x01){
+                if(error_state != NO_ERROR){
+                    send_respond_encoder_data_msg.id = (0 << 7) | (1 << 1); // 0 is the slave address, 1 is the function code
+                    send_respond_encoder_data_msg.dlc = 0; // Data Length Code
+                }else if(ModbusDATA[REG_CALIBRATE] == 0x01){
                     send_respond_encoder_data_msg.id = (0 << 7) | (62 << 1); // 0 is the slave address, 62 is the function code
                     send_respond_encoder_data_msg.dlc = 0; // Data Length Code
                     calibrated = CALIBRATING;
@@ -200,10 +214,10 @@ void vTaskMessageTranslator( void * pvParameters )
             }
 
             if((calibrated == NOT_CALIBRATED_YET) && (ModbusDATA[REG_ACTIVATE] == DEACTIVATE)){
-                // No operation
+                // No CAN message
+                xSemaphoreGive(CanTxSphrHandle);
             }else{
                 result = can2040_transmit(&cbus, &send_respond_encoder_data_msg);
-                //printf("Core %u: CanTransmit %d\n", get_core_num(), result);
             }
 
             if(calibrated == CALIBRATING){
@@ -221,7 +235,8 @@ void vTaskMessageTranslator( void * pvParameters )
 void initSerial()
 {
     // Modbus Serial Port
-    uart_init(uart1, 100000);
+    //uart_init(uart1, 100000);
+    uart_init(uart1, 38400);
     gpio_set_function(MODBUS_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MODBUS_RX_PIN, GPIO_FUNC_UART);
     uart_set_fifo_enabled(uart1, false);
@@ -286,9 +301,9 @@ int main()
     ModbusH.port = uart1;
     ModbusH.u8id = 8; // For master it must be 0
     ModbusH.u16timeOut = 1000;
-    ModbusH.EN_Port = NULL;
-    // ModbusH.EN_Port = (uint16_t *) 1; //enables the RS485 ChipSelect
-    // ModbusH.EN_Pin = MODBUS_EN_PIN; //Pi controlling RS485 ChipSelect
+    // ModbusH.EN_Port = NULL;
+    ModbusH.EN_Port = (uint16_t *) 1; //enables the RS485 ChipSelect
+    ModbusH.EN_Pin = MODBUS_EN_PIN; //Pi controlling RS485 ChipSelect
     ModbusH.u16regs = ModbusDATA;
     ModbusH.u16regsize= sizeof(ModbusDATA)/sizeof(ModbusDATA[0]);
     ModbusH.xTypeHW = USART_HW;
