@@ -117,11 +117,11 @@ static void can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *
     switch((msg->id >> 1) & 0x3F){
         case 60: //Respond_Gripper_data_pack
             current_position = msg->data[0];
-            activated = msg->data[3] & 0x01;
-            action_state = (msg->data[3] >> 1) & 0x01;
-            object_detection = (msg->data[3] >> 2) & 0x03;
-            error_state = (msg->data[3] >> 4) & 0x03;
-            calibrated = (msg->data[3] >> 7) & 0x01;
+            activated = (msg->data[3] >> 7) & 0x01;
+            action_state = (msg->data[3] >> 6) & 0x01;
+            object_detection = (msg->data[3] >> 4) & 0x03;
+            error_state = (msg->data[3] >> 2) & 0x03;
+            calibrated = (msg->data[3] >> 0) & 0x01;
             break;
     }
 
@@ -138,14 +138,7 @@ void vTaskSubtask( void * pvParameters )
 {
     for(;;)
     {
-        printf("Core %u: %d : %d : %d : %d\n", get_core_num(), current_position, activated, calibrated, error_state);
-        //printf("Core %u: %d : %d\n", get_core_num(), ModbusDATA[REG_ACTIVATE], ModbusDATA[REG_CALIBRATE]);
-        // ModbusDATAの中で値が0x01になっているレジスタを表示
-        //for (int i = 0; i < sizeof(ModbusDATA)/sizeof(ModbusDATA[0]); i++) {
-        //    if (ModbusDATA[i] == 0x01) {
-        //        printf("Core %u: ModbusDATA[0x%04x] = 0x01\n", get_core_num(), i);
-        //    }
-        //}
+        printf("Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -189,16 +182,18 @@ void vTaskMessageTranslator( void * pvParameters )
                             send_respond_encoder_data_msg.data[4] = 0x00;
                             send_respond_encoder_data_msg.data[5] = 0x00;
                         }
-                        target_position = position;
+                        ModbusDATA[REG_TARGET_POSITION] = target_position = position;
                         target_speed = speed;
                     }else{
-                        // If the position and speed are the same, just send a request for encoder data
-                        send_respond_encoder_data_msg.id = (0 << 7) | (28 << 1) | CAN2040_ID_RTR;
+                        // If the position and speed are the same, just send an empty request to update position data
+                        send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1) | CAN2040_ID_RTR;
                         send_respond_encoder_data_msg.dlc = 0;
                     }
+                }else{
+                    // Not calibrated yet
                 }
             }else{
-                if(ModbusDATA[REG_ACTIVATE] == DEACTIVATE){
+                if((activated == ACTIVATE) & (ModbusDATA[REG_ACTIVATE] == DEACTIVATE)){
                     send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1); // 0 is the slave address, 61 is the function code
                     send_respond_encoder_data_msg.dlc = 5; // Data Length Code
                     send_respond_encoder_data_msg.data[0] = 0;
@@ -208,7 +203,7 @@ void vTaskMessageTranslator( void * pvParameters )
                     send_respond_encoder_data_msg.data[4] = 0;
                 }else{
                     // If the gripper is not activated, just send a request for encoder data
-                    send_respond_encoder_data_msg.id = (0 << 7) | (28 << 1) | CAN2040_ID_RTR;
+                    send_respond_encoder_data_msg.id = (0 << 7) | (61 << 1) | CAN2040_ID_RTR;
                     send_respond_encoder_data_msg.dlc = 0;
                 }
             }
@@ -221,7 +216,8 @@ void vTaskMessageTranslator( void * pvParameters )
             }
 
             if(calibrated == CALIBRATING){
-                vTaskDelay(pdMS_TO_TICKS(6000));
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                calibrated = CALIBRATED;
                 ModbusDATA[REG_CALIBRATE] = 0;
             }
 
@@ -235,8 +231,8 @@ void vTaskMessageTranslator( void * pvParameters )
 void initSerial()
 {
     // Modbus Serial Port
-    //uart_init(uart1, 100000);
-    uart_init(uart1, 38400);
+    uart_init(uart1, 100000);
+    //uart_init(uart1, 38400);
     gpio_set_function(MODBUS_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MODBUS_RX_PIN, GPIO_FUNC_UART);
     uart_set_fifo_enabled(uart1, false);
