@@ -221,7 +221,7 @@ void vTaskMessageTranslator( void * pvParameters )
                 ModbusDATA[REG_CALIBRATE] = 0;
             }
 
-            vTaskDelay(pdMS_TO_TICKS(100));
+            // vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
 }
@@ -231,7 +231,8 @@ void vTaskMessageTranslator( void * pvParameters )
 void initSerial()
 {
     // Modbus Serial Port
-    uart_init(uart1, 100000);
+    //uart_init(uart1, 2000000);
+    uart_init(uart1, 921600);
     //uart_init(uart1, 38400);
     gpio_set_function(MODBUS_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MODBUS_RX_PIN, GPIO_FUNC_UART);
