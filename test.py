@@ -1,6 +1,7 @@
+from time import sleep
 from pymodbus.client import ModbusSerialClient
 
-SERIAL_PORT = 'COM6'
+SERIAL_PORT = 'COM8'
 BAUD_RATE = 100000
 DEVICE_ID = 0x08
 REGISTER_ADDRESS = 0x100
@@ -13,6 +14,10 @@ def main_rtu():
     client = ModbusSerialClient(
         port=SERIAL_PORT,
         baudrate=BAUD_RATE,
+        parity='N',
+        stopbits=1,
+        bytesize=8,
+        timeout=1
     )
     
     try:
@@ -26,6 +31,15 @@ def main_rtu():
         print(f"デバイスID: {DEVICE_ID} のレジスタアドレス: {hex(REGISTER_ADDRESS)} に値: {VALUE_TO_WRITE} を書き込みます。")
         response = client.write_register(
             address=REGISTER_ADDRESS,
+            value=VALUE_TO_WRITE,
+            slave=DEVICE_ID
+        )
+
+        sleep(1000)
+
+        print(f"デバイスID: {DEVICE_ID} のレジスタアドレス: 0x110 に値: {VALUE_TO_WRITE} を書き込みます。")
+        response = client.write_register(
+            address=0x110,
             value=VALUE_TO_WRITE,
             slave=DEVICE_ID
         )

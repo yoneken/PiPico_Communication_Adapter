@@ -10,11 +10,11 @@ extern "C" {
   #include "hardware/irq.h"
 }
 
-#define MODBUS_TX_PIN 4
-#define MODBUS_RX_PIN 5
-#define MODBUS_EN_PIN 3
-#define CANBUS_RX_PIN 6
-#define CANBUS_TX_PIN 7
+#define MODBUS_TX_PIN 0
+#define MODBUS_RX_PIN 1
+#define MODBUS_EN_PIN 2
+#define CANBUS_RX_PIN 4
+#define CANBUS_TX_PIN 3
 
 modbusHandler_t ModbusH;
 uint16_t ModbusDATA[0x8ff];
@@ -140,6 +140,21 @@ void vTaskSubtask( void * pvParameters )
     {
         printf("Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
         vTaskDelay(pdMS_TO_TICKS(1000));
+
+        /*
+        ModbusDATA[REG_ACTIVATE] = ACTIVATE;
+        printf("Activate: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ModbusDATA[REG_CALIBRATE] = 1;
+        printf("Calibrate: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
+        vTaskDelay(pdMS_TO_TICKS(6000));
+        ModbusDATA[REG_SET_POSITION] = 0x20;
+        printf("Set Position: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ModbusDATA[REG_SET_POSITION] = 0xf0;
+        printf("Set Position: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        */
     }
 }
 
@@ -221,7 +236,7 @@ void vTaskMessageTranslator( void * pvParameters )
                 ModbusDATA[REG_CALIBRATE] = 0;
             }
 
-            // vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 }
@@ -231,12 +246,13 @@ void vTaskMessageTranslator( void * pvParameters )
 void initSerial()
 {
     // Modbus Serial Port
-    //uart_init(uart1, 2000000);
-    uart_init(uart1, 921600);
-    //uart_init(uart1, 38400);
+    //uart_init(uart0, 2000000);
+    //uart_init(uart0, 921600);
+    uart_init(uart0, 460800);
+    //uart_init(uart0, 230400);
     gpio_set_function(MODBUS_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MODBUS_RX_PIN, GPIO_FUNC_UART);
-    uart_set_fifo_enabled(uart1, false);
+    uart_set_fifo_enabled(uart0, false);
 }
 
 
@@ -295,7 +311,7 @@ int main()
     ModbusDATA[REG_SET_SPEED] = target_speed * 255 / 20000;
 
     ModbusH.uModbusType = MB_SLAVE;
-    ModbusH.port = uart1;
+    ModbusH.port = uart0;
     ModbusH.u8id = 8; // For master it must be 0
     ModbusH.u16timeOut = 1000;
     // ModbusH.EN_Port = NULL;
