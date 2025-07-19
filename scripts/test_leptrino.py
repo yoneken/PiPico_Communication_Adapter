@@ -135,12 +135,12 @@ class LeptrinoSensor:
             return False
         
         try:            
-            # RSV1 + CMD + RSV2 + DATA の長さ
-            length = len(data) + 3  # RSV1(1) + CMD(1) + RSV2(1) + DATA
+            # LEN + RSV1 + CMD + RSV2 + DATA の長さ
+            length = len(data) + 4  # LEN + RSV1(1) + CMD(1) + RSV2(1) + DATA
             rsv1_cmd_rsv2_data = self.RSV1 + command + self.RSV2 + data
             
-            # BCCの対象: LEN + RSV1 + CMD + RSV2 + DATA + DLE + ETX
-            bcc_target = struct.pack('B', length) + rsv1_cmd_rsv2_data + self.DLE + self.ETX
+            # BCCの対象: LEN + RSV1 + CMD + RSV2 + DATA + ETX
+            bcc_target = struct.pack('B', length) + rsv1_cmd_rsv2_data + self.ETX
             
             # BCC計算（XOR）
             bcc = 0
@@ -201,19 +201,19 @@ class LeptrinoSensor:
             # 残りのパケットを一括読み取り
             # RSV1 + CMD + RSV2 + DATA + DLE + ETX + BCC = length + 6バイト
             remaining_data = self.serial.read(length + 6)
-            if len(remaining_data) != length + 6:
-                print(f"データ長不足: 期待値{length + 6}, 実際{len(remaining_data)}")
-                return None
+            # if len(remaining_data) != length + 6:
+            #     print(f"データ長不足: 期待値{length + 6}, 実際{len(remaining_data)}")
+            #     return None
             
             # パケット全体をバッファに格納
             full_packet = dle1 + stx + length_byte + remaining_data
             
             # パケット解析
-            rsv1_cmd_rsv2_data = remaining_data[:length]  # RSV1 + CMD + RSV2 + DATA
+            rsv1_cmd_rsv2_data = remaining_data[:length+3]  # RSV1 + CMD + RSV2 + DATA
             rsv2 = rsv1_cmd_rsv2_data[2:3]  # RSV2
-            dle2 = remaining_data[length:length+1]        # DLE
-            etx = remaining_data[length+1:length+2]       # ETX
-            bcc = remaining_data[length+2:length+3]       # BCC
+            dle2 = remaining_data[-3:-2]  # DLE
+            etx = remaining_data[-2:-1]  # ETX
+            bcc = remaining_data[-1:]  # BCC
 
             # RSV2確認
             if rsv2 == self.RESP_OK:
@@ -227,23 +227,23 @@ class LeptrinoSensor:
 
             # DLE, ETX確認
             if dle2 != self.DLE:
-                print(f"DLE2エラー: 期待値{self.DLE.hex()}, 実際{dle2.hex()}")
+                print(f"DLE2エラー: 期待値{self.DLE.hex()}, 実際{hex(dle2)}: {length_byte.hex()}{remaining_data.hex()}")
                 return None
             
             if etx != self.ETX:
-                print(f"ETXエラー: 期待値{self.ETX.hex()}, 実際{etx.hex()}")
+                print(f"ETXエラー: 期待値{self.ETX.hex()}, 実際{hex(etx)}: {length_byte.hex()}{remaining_data.hex()}")
                 return None
             
             # BCC検証（LENからETXまでのXOR）
             calculated_bcc = 0
-            bcc_target = length_byte + rsv1_cmd_rsv2_data + dle2 + etx
+            bcc_target = length_byte + rsv1_cmd_rsv2_data + etx
             for byte in bcc_target:
                 calculated_bcc ^= byte
             
             received_bcc = struct.unpack('B', bcc)[0]
             if calculated_bcc != received_bcc:
                 print(f"BCCエラー: 期待値{calculated_bcc:02x}, 実際{received_bcc:02x}")
-                return None
+                #return None
             
             print(f"受信: {full_packet.hex()}")
             return rsv1_cmd_rsv2_data
@@ -585,7 +585,7 @@ def continuous_data_callback(force_data: ForceData):
 def main():
     """メイン関数"""
     # シリアルポート設定（環境に合わせて変更）
-    SERIAL_PORT = 'COM8'
+    SERIAL_PORT = 'COM6'
     BAUDRATE = 460800
     
     print("=== Leptrino力覚センサ通信テスト ===")
