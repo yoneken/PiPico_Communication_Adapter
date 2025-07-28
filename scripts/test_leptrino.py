@@ -79,7 +79,6 @@ class LeptrinoSensor:
         self.timeout = timeout
         self.serial: Optional[serial.Serial] = None
         self.continuous_mode = False
-        self.handshake_mode = False
         self.data_callback = None
         self.receive_thread = None
         self.stop_event = threading.Event()
@@ -112,7 +111,6 @@ class LeptrinoSensor:
     def disconnect(self):
         """センサから切断"""
         self.stop_continuous_mode()
-        self.stop_handshake_mode()
         
         if self.serial and self.serial.is_open:
             self.serial.close()
@@ -139,9 +137,11 @@ class LeptrinoSensor:
             length = len(data) + 4  # LEN + RSV1(1) + CMD(1) + RSV2(1) + DATA
             rsv1_cmd_rsv2_data = self.RSV1 + command + self.RSV2 + data
             
-            # BCCの対象: LEN + RSV1 + CMD + RSV2 + DATA + ETX
-            bcc_target = struct.pack('B', length) + rsv1_cmd_rsv2_data + self.ETX
-            
+            # BCCの対象: LEN + RSV1 + CMD + RSV2 + DATA + DLE + ETX
+            bcc_target = struct.pack('B', length) + rsv1_cmd_rsv2_data + self.DLE + self.ETX
+            # bcc_target の中にDLEが含まれたら除外する処理
+            bcc_target = bcc_target.replace(self.DLE, b'')
+
             # BCC計算（XOR）
             bcc = 0
             for byte in bcc_target:
@@ -199,11 +199,10 @@ class LeptrinoSensor:
             length = struct.unpack('B', length_byte)[0]
             
             # 残りのパケットを一括読み取り
-            # RSV1 + CMD + RSV2 + DATA + DLE + ETX + BCC = length + 6バイト
-            remaining_data = self.serial.read(length + 6)
-            # if len(remaining_data) != length + 6:
-            #     print(f"データ長不足: 期待値{length + 6}, 実際{len(remaining_data)}")
-            #     return None
+            # (LEN + RSV1 + CMD + RSV2 + DATA) + DLE + ETX= length + 2バイト
+            remaining_data = self.serial.read(length + 2)
+            if len(remaining_data) != length + 2:
+               print(f"データ長不足: 期待値{length + 2}, 実際{len(remaining_data)}")
             
             # パケット全体をバッファに格納
             full_packet = dle1 + stx + length_byte + remaining_data
@@ -225,28 +224,21 @@ class LeptrinoSensor:
             elif rsv2 == self.RESP_ERROR:
                 print("応答: その他エラー")
 
-            # DLE, ETX確認
-            if dle2 != self.DLE:
-                print(f"DLE2エラー: 期待値{self.DLE.hex()}, 実際{hex(dle2)}: {length_byte.hex()}{remaining_data.hex()}")
-                return None
-            
-            if etx != self.ETX:
-                print(f"ETXエラー: 期待値{self.ETX.hex()}, 実際{hex(etx)}: {length_byte.hex()}{remaining_data.hex()}")
-                return None
-            
-            # BCC検証（LENからETXまでのXOR）
+            # BCC検証（LEN + RSV1 + CMD + RSV2 + DATA + DLE + ETX）
             calculated_bcc = 0
-            bcc_target = length_byte + rsv1_cmd_rsv2_data + etx
+            bcc_target = length_byte + rsv1_cmd_rsv2_data[:-3] + dle2 + etx
+            # bcc_target の中にDLEが含まれたら除外する処理
+            bcc_target = bcc_target.replace(self.DLE, b'')
             for byte in bcc_target:
                 calculated_bcc ^= byte
             
             received_bcc = struct.unpack('B', bcc)[0]
             if calculated_bcc != received_bcc:
                 print(f"BCCエラー: 期待値{calculated_bcc:02x}, 実際{received_bcc:02x}")
-                #return None
+                return None
             
             print(f"受信: {full_packet.hex()}")
-            return rsv1_cmd_rsv2_data
+            return rsv1_cmd_rsv2_data[:-3]
             
         except Exception as e:
             print(f"応答受信エラー: {e}")
@@ -279,7 +271,7 @@ class LeptrinoSensor:
             # RSV1(1) + CMD(1) を除いた実際のDATA部分
             data_part = response[2:]
             
-            if len(data_part) < 38:  # DATAの最小サイズチェック
+            if len(data_part) < 35:  # DATAの最小サイズチェック
                 print(f"データ部分が不足: {len(data_part)}バイト")
                 return None
             
@@ -331,7 +323,7 @@ class LeptrinoSensor:
             # RSV1(1) + CMD(1) を除いた実際のDATA部分
             data_part = response[2:]
             
-            if len(data_part) < 24:  # DATAの最小サイズチェック
+            if len(data_part) < 21:  # DATAの最小サイズチェック
                 print(f"データ部分が不足: {len(data_part)}バイト")
                 return None
             
@@ -361,46 +353,6 @@ class LeptrinoSensor:
             
         except Exception as e:
             print(f"センサ定格値解析エラー: {e}")
-
-    def start_handshake_mode(self) -> bool:
-        """
-        ハンドシェイク方式開始
-        
-        Returns:
-            開始成功時True
-        """
-        if not self._send_command(self.CMD_START_HANDSHAKE):
-            return False
-        
-        response = self._receive_response()
-        if response and len(response) >= 4:
-            # RSV1 + CMD + RSV2 + DATA(STATUS)
-            status = response[2]  # RSV2（ステータス）
-            if status == 0x00:  # 正常終了
-                self.handshake_mode = True
-                print("ハンドシェイク方式を開始しました")
-                return True
-            else:
-                print(f"ハンドシェイク開始エラー: 0x{status:02x}")
-                return False
-        else:
-            print("ハンドシェイク方式の開始に失敗しました")
-            return False
-        
-    def stop_handshake_mode(self) -> bool:
-        """
-        ハンドシェイク方式停止
-        
-        Returns:
-            停止成功時True
-        """
-        if not self.handshake_mode:
-            return True
-        
-        # ハンドシェイク方式は特に停止コマンドがないため、フラグのみリセット
-        self.handshake_mode = False
-        print("ハンドシェイク方式を停止しました")
-        return True
         
     def get_handshake_data(self) -> Optional[ForceData]:
         """
@@ -408,11 +360,7 @@ class LeptrinoSensor:
         
         Returns:
             力覚データ、エラー時None
-        """
-        if not self.handshake_mode:
-            print("ハンドシェイク方式が開始されていません")
-            return None
-        
+        """        
         if not self._send_command(self.CMD_START_HANDSHAKE):
             return None
         
@@ -544,7 +492,7 @@ class LeptrinoSensor:
             # Bit5: 外部入力信号検出（対応機種のみ）
             # Bit6: 予備（不定）
             # Bit7: 予備（不定）
-            data_status = data_part[-2]  # 最後の1バイトがステータス
+            data_status = data_part[-2]  # 最後から2バイト目がステータス
             if data_status & 0x01:
                 print("ROM上の補正データ異常")
                 return None
@@ -565,8 +513,8 @@ class LeptrinoSensor:
             mz = struct.unpack('<h', data_part[10:12])[0]
             
             return ForceData(
-                fx=fx * self.sensor_rating_data.fx, fy=fy * self.sensor_rating_data.fy, fz=fz * self.sensor_rating_data.fz,
-                mx=mx * self.sensor_rating_data.mx, my=my * self.sensor_rating_data.my, mz=mz * self.sensor_rating_data.mz,
+                fx=fx * self.sensor_rating_data.fx / 10000, fy=fy * self.sensor_rating_data.fy / 10000, fz=fz * self.sensor_rating_data.fz / 10000,
+                mx=mx * self.sensor_rating_data.mx / 10000, my=my * self.sensor_rating_data.my / 10000, mz=mz * self.sensor_rating_data.mz / 10000,
                 timestamp=time.time()
             )
             
@@ -611,6 +559,8 @@ def main():
         else:
             print("製品情報の取得に失敗しました")
             return
+        # BCCエラー: 期待値03, 実際91
+        # 100226ff2a0050465330353559413235315236202020323431323132342052343039313230302020100391
 
         # 2. センサ定格値取得
         print("\n2. センサ定格値取得")
@@ -626,30 +576,39 @@ def main():
         else:
             print("センサ定格値の取得に失敗しました")
             return
+        # BCCエラー: 期待値03, 実際72
+        # 10021cff2b0000007a4300007a4300007a430000c0400000c0400000c040100372
 
         # 3. ハンドシェイク方式テスト
         print("\n3. ハンドシェイク方式テスト")
         print("-" * 30)
-        if sensor.start_handshake_mode():
-            print("5回データを取得します...")
-            for i in range(5):
-                force_data = sensor.get_handshake_data()
-                if force_data:
-                    print(f"[{i+1}] Fx={force_data.fx:6.2f}N, Fy={force_data.fy:6.2f}N, Fz={force_data.fz:6.2f}N, "
-                          f"Mx={force_data.mx:6.2f}Nm, My={force_data.my:6.2f}Nm, Mz={force_data.mz:6.2f}Nm")
-                else:
-                    print(f"[{i+1}] データ取得に失敗しました")
-                time.sleep(0.1)
-            
-            sensor.stop_handshake_mode()
+        print("5回データを取得します...")
+        for i in range(5):
+            force_data = sensor.get_handshake_data()
+            if force_data:
+                print(f"[{i+1}] Fx={force_data.fx:6.2f}N, Fy={force_data.fy:6.2f}N, Fz={force_data.fz:6.2f}N, "
+                        f"Mx={force_data.mx:6.2f}Nm, My={force_data.my:6.2f}Nm, Mz={force_data.mz:6.2f}Nm")
+            else:
+                print(f"[{i+1}] データ取得に失敗しました")
+            time.sleep(0.1)
+        # BCCエラー: 期待値04, 実際24
+        # 受信: 100214ff30009b03ee00a6004200dcfef9ff0000400a100324
+        # BCCエラー: 期待値04, 実際1d
+        # 受信: 100214ff30009b03ed009f004300dbfefdff0000400b10031d
+        # BCCエラー: 期待値04, 実際21
+        # 受信: 100214ff30009903eb00a2004200dbfefeff0000400c100321
+        # BCCエラー: 期待値04, 実際25
+        # 受信: 100214ff30009a03ed00a2004300dbfe00000000400d100325
+        # BCCエラー: 期待値04, 実際39
+        # 受信: 100214ff30009a03f000a2004100dbfeffff0000400e100339
 
         # 4. 連続出力方式テスト
-        print("\n4. 連続出力方式テスト")
-        print("-" * 30)
-        if sensor.start_continuous_mode(callback=continuous_data_callback):
-            print("5秒間連続出力を受信します...")
-            time.sleep(5.0)
-            sensor.stop_continuous_mode()
+        # print("\n4. 連続出力方式テスト")
+        # print("-" * 30)
+        # if sensor.start_continuous_mode(callback=continuous_data_callback):
+        #     print("5秒間連続出力を受信します...")
+        #     time.sleep(5.0)
+        #     sensor.stop_continuous_mode()
         
         print("\nテスト完了")
         
