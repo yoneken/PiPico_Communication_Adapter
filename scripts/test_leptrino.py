@@ -384,8 +384,8 @@ class LeptrinoSensor:
             return False
         
         response = self._receive_response()
-        if response and len(response) >= 4:
-            # RSV1 + CMD + RSV2 + DATA(STATUS)
+        if response and len(response) >= 3:
+            # RSV1 + CMD + DATA(STATUS)
             status = response[2]  # RSV2（ステータス）
             if status == 0x00:  # 正常終了
                 self.continuous_mode = True
@@ -425,8 +425,8 @@ class LeptrinoSensor:
             return False
         
         response = self._receive_response()
-        if response and len(response) >= 4:
-            # RSV1 + CMD + RSV2 + DATA(STATUS)
+        if response and len(response) >= 3:
+            # RSV1 + CMD + DATA(STATUS)
             status = response[2]  # RSV2（ステータス）
             if status == 0x00:  # 正常終了
                 self.continuous_mode = False
@@ -559,8 +559,6 @@ def main():
         else:
             print("製品情報の取得に失敗しました")
             return
-        # BCCエラー: 期待値03, 実際91
-        # 100226ff2a0050465330353559413235315236202020323431323132342052343039313230302020100391
 
         # 2. センサ定格値取得
         print("\n2. センサ定格値取得")
@@ -576,8 +574,6 @@ def main():
         else:
             print("センサ定格値の取得に失敗しました")
             return
-        # BCCエラー: 期待値03, 実際72
-        # 10021cff2b0000007a4300007a4300007a430000c0400000c0400000c040100372
 
         # 3. ハンドシェイク方式テスト
         print("\n3. ハンドシェイク方式テスト")
@@ -591,24 +587,14 @@ def main():
             else:
                 print(f"[{i+1}] データ取得に失敗しました")
             time.sleep(0.1)
-        # BCCエラー: 期待値04, 実際24
-        # 受信: 100214ff30009b03ee00a6004200dcfef9ff0000400a100324
-        # BCCエラー: 期待値04, 実際1d
-        # 受信: 100214ff30009b03ed009f004300dbfefdff0000400b10031d
-        # BCCエラー: 期待値04, 実際21
-        # 受信: 100214ff30009903eb00a2004200dbfefeff0000400c100321
-        # BCCエラー: 期待値04, 実際25
-        # 受信: 100214ff30009a03ed00a2004300dbfe00000000400d100325
-        # BCCエラー: 期待値04, 実際39
-        # 受信: 100214ff30009a03f000a2004100dbfeffff0000400e100339
 
         # 4. 連続出力方式テスト
-        # print("\n4. 連続出力方式テスト")
-        # print("-" * 30)
-        # if sensor.start_continuous_mode(callback=continuous_data_callback):
-        #     print("5秒間連続出力を受信します...")
-        #     time.sleep(5.0)
-        #     sensor.stop_continuous_mode()
+        print("\n4. 連続出力方式テスト")
+        print("-" * 30)
+        if sensor.start_continuous_mode(callback=continuous_data_callback):
+            print("5秒間連続出力を受信します...")
+            time.sleep(5.0)
+            sensor.stop_continuous_mode()
         
         print("\nテスト完了")
         
