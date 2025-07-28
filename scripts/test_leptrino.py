@@ -10,7 +10,7 @@ import serial
 import time
 import struct
 import threading
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Callable
 from dataclasses import dataclass
 
 @dataclass
@@ -65,7 +65,7 @@ class LeptrinoSensor:
     RSV1 = b'\xFF'  # 予約フィールド1
     RSV2 = b'\x00'  # 予約フィールド2
 
-    def __init__(self, port: str = 'COM8', baudrate: int = 460800, timeout: float = 1.0):
+    def __init__(self, port: str = 'COM8', baudrate: int = 460800, timeout: float = 1.0) -> None:
         """
         初期化
         
@@ -79,8 +79,8 @@ class LeptrinoSensor:
         self.timeout = timeout
         self.serial: Optional[serial.Serial] = None
         self.continuous_mode = False
-        self.data_callback = None
-        self.receive_thread = None
+        self.data_callback: Optional[Callable[[ForceData], None]] = None
+        self.receive_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.sensor_rating_data: Optional[SensorRatingData] = None
         
@@ -108,7 +108,7 @@ class LeptrinoSensor:
             print(f"接続エラー: {e}")
             return False
     
-    def disconnect(self):
+    def disconnect(self) -> None:
         """センサから切断"""
         self.stop_continuous_mode()
         
@@ -370,7 +370,7 @@ class LeptrinoSensor:
         
         return self._parse_force_data(response)
     
-    def start_continuous_mode(self, callback=None) -> bool:
+    def start_continuous_mode(self, callback: Optional[Callable[[ForceData], None]] = None) -> bool:
         """
         連続出力方式開始
         
@@ -439,7 +439,7 @@ class LeptrinoSensor:
             print("連続出力方式の停止に失敗しました")
             return False
     
-    def _continuous_receive_loop(self):
+    def _continuous_receive_loop(self) -> None:
         """連続出力データ受信ループ"""
         while not self.stop_event.is_set():
             try:
@@ -524,13 +524,13 @@ class LeptrinoSensor:
             return None
     
 
-def continuous_data_callback(force_data: ForceData):
+def continuous_data_callback(force_data: ForceData) -> None:
     """連続出力データ受信時のコールバック関数"""
     print(f"連続データ: Fx={force_data.fx:6.2f}N, Fy={force_data.fy:6.2f}N, Fz={force_data.fz:6.2f}N, "
           f"Mx={force_data.mx:6.2f}Nm, My={force_data.my:6.2f}Nm, Mz={force_data.mz:6.2f}Nm")
 
 
-def main():
+def main() -> None:
     """メイン関数"""
     # シリアルポート設定（環境に合わせて変更）
     SERIAL_PORT = 'COM6'
