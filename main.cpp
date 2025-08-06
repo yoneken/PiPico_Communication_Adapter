@@ -4,17 +4,22 @@
 #include "semphr.h"
 #include "task.h"
 #include "Modbus.h"
+#include "hardware/pio.h"
 
 extern "C" {
   #include "can2040.h"
   #include "hardware/irq.h"
+  #include "rs422_tx.h"
 }
 
-#define MODBUS_TX_PIN 0
+#define MODBUS_TX_PIN 0 
 #define MODBUS_RX_PIN 1
 #define MODBUS_EN_PIN 2
 #define CANBUS_RX_PIN 4
 #define CANBUS_TX_PIN 3
+#define RS422_RXP_PIN 5
+#define RS422_TXP_PIN 6
+#define RS422_TXM_PIN 7
 
 modbusHandler_t ModbusH;
 uint16_t ModbusDATA[0x8ff];
@@ -282,6 +287,7 @@ int main()
 
     initSerial();
     initCanbus();
+    rs422_init(460800, RS422_TXP_PIN);
 
     BaseType_t xReturnedMessageTranslator, xReturnedSubtask;
     TaskHandle_t xHandleMessageTranslator = NULL, xHandleSubtask = NULL;

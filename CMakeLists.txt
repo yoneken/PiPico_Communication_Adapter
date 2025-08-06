@@ -54,6 +54,7 @@ target_link_libraries(PiPico_Communication_Adapter
 target_include_directories(PiPico_Communication_Adapter PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         include/
+        rs422/
         ${picoSdk}/sdk/2.1.1/src/rp2_common/hardware_irq/include/
         can2040/src/
 )
@@ -109,6 +110,11 @@ can2040/include/
 modbus/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include/
 ${picoSdk}/sdk/2.1.1/src/rp2040/hardware_regs/include/)
 
+add_library(pio_rs422_tx STATIC rs422/rs422_tx.c)
+pico_generate_pio_header(pio_rs422_tx ${CMAKE_CURRENT_SOURCE_DIR}/rs422/rs422_tx.pio)
+target_link_libraries(pio_rs422_tx pico_stdlib hardware_pio)
+target_include_directories(pio_rs422_tx PUBLIC rs422/)
+
 pico_add_extra_outputs(PiPico_Communication_Adapter)
 
-target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus Can2040 hardware_pio)
+target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus Can2040 pio_rs422_tx hardware_pio)
