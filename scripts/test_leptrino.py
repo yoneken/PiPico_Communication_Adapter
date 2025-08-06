@@ -84,6 +84,7 @@ class LeptrinoSensor:
         self.receive_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.sensor_rating_data: Optional[SensorRatingData] = None
+        self.offset_data: Optional[ForceData] = None
         
     def connect(self) -> bool:
         """
@@ -355,6 +356,80 @@ class LeptrinoSensor:
         except Exception as e:
             print(f"センサ定格値解析エラー: {e}")
         
+    def set_offset(self, offset_data: ForceData) -> None:
+        """
+        オフセット値を設定
+        
+        Args:
+            offset_data: オフセット値として使用する力覚データ
+        """
+        self.offset_data = offset_data
+        print(f"オフセット値を設定しました: Fx={offset_data.fx:6.2f}N, Fy={offset_data.fy:6.2f}N, Fz={offset_data.fz:6.2f}N, "
+              f"Mx={offset_data.mx:6.2f}Nm, My={offset_data.my:6.2f}Nm, Mz={offset_data.mz:6.2f}Nm")
+    
+    def clear_offset(self) -> None:
+        """オフセット値をクリア"""
+        self.offset_data = None
+        print("オフセット値をクリアしました")
+    
+    def capture_current_offset(self, samples: int = 10) -> bool:
+        """
+        現在のセンサ値をオフセットとして設定（複数回測定の平均値）
+        
+        Args:
+            samples: 平均計算に使用するサンプル数
+            
+        Returns:
+            オフセット取得成功時True
+        """
+        print(f"オフセット値を取得中... ({samples}回の平均)")
+        
+        fx_sum = fy_sum = fz_sum = mx_sum = my_sum = mz_sum = 0.0
+        success_count = 0
+        
+        # オフセットを無効化してrawデータを取得
+        self.offset_data = None
+
+        for i in range(samples):
+            
+            force_data = self.get_handshake_data()
+            
+            if force_data:
+                fx_sum += force_data.fx
+                fy_sum += force_data.fy
+                fz_sum += force_data.fz
+                mx_sum += force_data.mx
+                my_sum += force_data.my
+                mz_sum += force_data.mz
+                success_count += 1
+                print(f"  サンプル {i+1}/{samples}: 取得成功")
+            else:
+                print(f"  サンプル {i+1}/{samples}: 取得失敗")
+            
+            time.sleep(0.05)  # 短い間隔で取得
+        
+        if success_count > 0:
+            # 平均値を計算してオフセットとして設定
+            avg_fx = fx_sum / success_count
+            avg_fy = fy_sum / success_count
+            avg_fz = fz_sum / success_count
+            avg_mx = mx_sum / success_count
+            avg_my = my_sum / success_count
+            avg_mz = mz_sum / success_count
+            
+            offset_data = ForceData(
+                fx=avg_fx, fy=avg_fy, fz=avg_fz,
+                mx=avg_mx, my=avg_my, mz=avg_mz,
+                timestamp=time.time()
+            )
+            
+            self.set_offset(offset_data)
+            print(f"オフセット取得完了 (成功率: {success_count}/{samples})")
+            return True
+        else:
+            print("オフセット取得に失敗しました")
+            return False
+        
     def get_handshake_data(self) -> Optional[ForceData]:
         """
         ハンドシェイク方式でデータ取得
@@ -513,9 +588,26 @@ class LeptrinoSensor:
             my = struct.unpack('<h', data_part[8:10])[0]
             mz = struct.unpack('<h', data_part[10:12])[0]
             
+            # 物理値に変換
+            fx_physical = fx * self.sensor_rating_data.fx / 10000
+            fy_physical = fy * self.sensor_rating_data.fy / 10000
+            fz_physical = fz * self.sensor_rating_data.fz / 10000
+            mx_physical = mx * self.sensor_rating_data.mx / 10000
+            my_physical = my * self.sensor_rating_data.my / 10000
+            mz_physical = mz * self.sensor_rating_data.mz / 10000
+            
+            # オフセット補正
+            if self.offset_data:
+                fx_physical -= self.offset_data.fx
+                fy_physical -= self.offset_data.fy
+                fz_physical -= self.offset_data.fz
+                mx_physical -= self.offset_data.mx
+                my_physical -= self.offset_data.my
+                mz_physical -= self.offset_data.mz
+            
             return ForceData(
-                fx=fx * self.sensor_rating_data.fx / 10000, fy=fy * self.sensor_rating_data.fy / 10000, fz=fz * self.sensor_rating_data.fz / 10000,
-                mx=mx * self.sensor_rating_data.mx / 10000, my=my * self.sensor_rating_data.my / 10000, mz=mz * self.sensor_rating_data.mz / 10000,
+                fx=fx_physical, fy=fy_physical, fz=fz_physical,
+                mx=mx_physical, my=my_physical, mz=mz_physical,
                 timestamp=time.time()
             )
             
@@ -575,7 +667,7 @@ def main() -> None:
         else:
             print("センサ定格値の取得に失敗しました")
             return
-
+        
         # 3. ハンドシェイク方式テスト
         print("\n3. ハンドシェイク方式テスト")
         print("-" * 30)
@@ -596,6 +688,20 @@ def main() -> None:
             print("5秒間連続出力を受信します...")
             time.sleep(5.0)
             sensor.stop_continuous_mode()
+        
+        # 5. オフセット機能テスト
+        print("\n5. オフセット機能テスト")
+        print("-" * 30)
+        
+        # オフセット取得・設定
+        if sensor.capture_current_offset(samples=5):
+            print("\nオフセット設定後のデータ:")
+            for i in range(3):
+                force_data = sensor.get_handshake_data()
+                if force_data:
+                    print(f"  Fx={force_data.fx:6.2f}N, Fy={force_data.fy:6.2f}N, Fz={force_data.fz:6.2f}N, "
+                          f"Mx={force_data.mx:6.2f}Nm, My={force_data.my:6.2f}Nm, Mz={force_data.mz:6.2f}Nm")
+                time.sleep(0.1)
         
         print("\nテスト完了")
         
