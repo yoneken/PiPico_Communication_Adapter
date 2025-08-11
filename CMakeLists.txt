@@ -115,6 +115,10 @@ pico_generate_pio_header(pio_rs422_tx ${CMAKE_CURRENT_SOURCE_DIR}/rs422/rs422_tx
 target_link_libraries(pio_rs422_tx pico_stdlib hardware_pio)
 target_include_directories(pio_rs422_tx PUBLIC rs422/)
 
+add_library(Leptrino STATIC leptrino/leptrino.cpp)
+target_link_libraries(Leptrino pico_stdlib hardware_uart)
+target_include_directories(Leptrino PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/leptrino)
+
 pico_add_extra_outputs(PiPico_Communication_Adapter)
 
-target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus Can2040 pio_rs422_tx hardware_pio)
+target_link_libraries(PiPico_Communication_Adapter hardware_exception pico_multicore FreeRTOS Modbus Can2040 pio_rs422_tx Leptrino hardware_pio)

@@ -5,6 +5,8 @@
 #include "task.h"
 #include "Modbus.h"
 #include "hardware/pio.h"
+#include "leptrino.h"
+#include "hardware/uart.h"
 
 extern "C" {
   #include "can2040.h"
@@ -20,6 +22,11 @@ extern "C" {
 #define RS422_RXP_PIN 5
 #define RS422_TXP_PIN 6
 #define RS422_TXM_PIN 7
+#define LEPTRINO_TX_PIN 8
+#define LEPTRINO_RX_PIN 9
+
+// グローバル変数
+LeptrinoSensor* g_leptrino_sensor = nullptr;
 
 modbusHandler_t ModbusH;
 uint16_t ModbusDATA[0x8ff];
@@ -52,6 +59,7 @@ Fn100, activated the gripper, 0-1, -, 0, immediately, 0x0100
 Fn101, control mode, 0-2 0：location 1：speed, -, 0, immediately 0x0101
 Fn109, fault reset, 0-1, -, 0, immediately, 0x0109
 Fn110, calibrate gripper, 0-1, -, 0, immediately, 0x0110
+Fn120, calibrate force sensor, 0-1, -, 0, immediately, 0x0120
 
 Fn2xx Gain Parameters
 Fn200, position loop gain, 10-20000, 0.1Hz, 200, immediately, 0x0200
@@ -94,7 +102,23 @@ Fn806, rated voltage, 1-6000, 0.01V, 2400, effective after power on, 0x0806
 Fn807, rated current, 1-2400, 0.01A, 800, effective after power on, 0x0807
 */
 
-enum { REG_TARGET_POSITION=0x004, REG_MOTOR_POSITION=0x006, REG_ACTIVATE=0x100, REG_MODE=0x101, REG_FAULT_RESET=0x109, REG_CALIBRATE=0x110, REG_SET_SPEED=0x303, REG_SET_POSITION=0x700 };
+enum {
+    REG_TARGET_POSITION=0x004,
+    REG_MOTOR_POSITION=0x006,
+    REG_X_FORCE=0x030,
+    REG_Y_FORCE=0x034,
+    REG_Z_FORCE=0x038,
+    REG_X_TORQUE=0x040,
+    REG_Y_TORQUE=0x044,
+    REG_Z_TORQUE=0x048,
+    REG_ACTIVATE=0x100,
+    REG_MODE=0x101,
+    REG_FAULT_RESET=0x109,
+    REG_CALIBRATE_GRIPPER=0x110,
+    REG_CALIBRATE_FORCE_SENSOR=0x120,
+    REG_SET_SPEED=0x303,
+    REG_SET_POSITION=0x700
+};
 
 enum { DEACTIVATE=0, ACTIVATE };
 enum { IDLE_AUTO_RELEASE_CALIB=0, GO_TO };
@@ -150,7 +174,7 @@ void vTaskSubtask( void * pvParameters )
         ModbusDATA[REG_ACTIVATE] = ACTIVATE;
         printf("Activate: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
         vTaskDelay(pdMS_TO_TICKS(1000));
-        ModbusDATA[REG_CALIBRATE] = 1;
+        ModbusDATA[REG_CALIBRATE_GRIPPER] = 1;
         printf("Calibrate: Core %u: %d | %d : %d : %d : %d\n", get_core_num(), current_position, target_position, activated, calibrated, error_state);
         vTaskDelay(pdMS_TO_TICKS(6000));
         ModbusDATA[REG_SET_POSITION] = 0x20;
@@ -169,6 +193,27 @@ void vTaskMessageTranslator( void * pvParameters )
     int result = 0;
     for(;;)
     {
+        // Leptrinoセンサのデータ処理
+        if (g_leptrino_sensor && g_leptrino_sensor->has_complete_packet()) {
+            // パケットが完了したので、最新データを取得してModbusレジスタに格納
+            ForceData force_data;
+            if (g_leptrino_sensor->get_latest_force_data(force_data)) {
+                // float値をint16_t形式で格納（スケール調整）
+                ModbusDATA[REG_X_FORCE] = (int16_t)(force_data.fx * 100);  // X Force (0.01N単位)
+                ModbusDATA[REG_X_FORCE + 1] = (int16_t)(force_data.fx * 100) >> 16;
+                ModbusDATA[REG_Y_FORCE] = (int16_t)(force_data.fy * 100);  // Y Force
+                ModbusDATA[REG_Y_FORCE + 1] = (int16_t)(force_data.fy * 100) >> 16;
+                ModbusDATA[REG_Z_FORCE] = (int16_t)(force_data.fz * 100);  // Z Force
+                ModbusDATA[REG_Z_FORCE + 1] = (int16_t)(force_data.fz * 100) >> 16;
+                ModbusDATA[REG_X_TORQUE] = (int16_t)(force_data.mx * 1000); // X Torque (0.001Nm単位)
+                ModbusDATA[REG_X_TORQUE + 1] = (int16_t)(force_data.mx * 1000) >> 16;
+                ModbusDATA[REG_Y_TORQUE] = (int16_t)(force_data.my * 1000); // Y Torque
+                ModbusDATA[REG_Y_TORQUE + 1] = (int16_t)(force_data.my * 1000) >> 16;
+                ModbusDATA[REG_Z_TORQUE] = (int16_t)(force_data.mz * 1000); // Z Torque
+                ModbusDATA[REG_Z_TORQUE + 1] = (int16_t)(force_data.mz * 1000) >> 16;
+            }
+        }
+        
         if(xSemaphoreTake(CanTxSphrHandle , 20) == pdTRUE){
             ModbusDATA[REG_MOTOR_POSITION] = current_position;
             if(ModbusDATA[REG_ACTIVATE] == ACTIVATE){
@@ -178,7 +223,7 @@ void vTaskMessageTranslator( void * pvParameters )
                 if(error_state != NO_ERROR){
                     send_respond_encoder_data_msg.id = (0 << 7) | (1 << 1); // 0 is the slave address, 1 is the function code
                     send_respond_encoder_data_msg.dlc = 0; // Data Length Code
-                }else if(ModbusDATA[REG_CALIBRATE] == 0x01){
+                }else if(ModbusDATA[REG_CALIBRATE_GRIPPER] == 0x01){
                     send_respond_encoder_data_msg.id = (0 << 7) | (62 << 1); // 0 is the slave address, 62 is the function code
                     send_respond_encoder_data_msg.dlc = 0; // Data Length Code
                     calibrated = CALIBRATING;
@@ -238,7 +283,7 @@ void vTaskMessageTranslator( void * pvParameters )
             if(calibrated == CALIBRATING){
                 vTaskDelay(pdMS_TO_TICKS(5000));
                 calibrated = CALIBRATED;
-                ModbusDATA[REG_CALIBRATE] = 0;
+                ModbusDATA[REG_CALIBRATE_GRIPPER] = 0;
             }
 
             vTaskDelay(pdMS_TO_TICKS(1));
@@ -280,6 +325,31 @@ void initCanbus(void)
     can2040_start(&cbus, sys_clock, bitrate, gpio_rx, gpio_tx);
 }
 
+// UART2割り込みハンドラ
+void on_uart2_rx() {
+    while (uart_is_readable(uart1)) {  // uart1 = UART2相当
+        uint8_t byte = uart_getc(uart1);
+        if (g_leptrino_sensor) {
+            g_leptrino_sensor->on_uart_rx_interrupt(byte);
+        }
+    }
+}
+
+// Leptrinoセンサ初期化
+void init_leptrino_sensor() {
+    g_leptrino_sensor = new LeptrinoSensor(uart1, 460800, LEPTRINO_TX_PIN, LEPTRINO_RX_PIN);
+    
+    if (g_leptrino_sensor->connect()) {
+        // UART割り込み設定
+        irq_set_exclusive_handler(UART1_IRQ, on_uart2_rx);
+        irq_set_enabled(UART1_IRQ, true);
+        uart_set_irq_enables(uart1, true, false);  // RX割り込みのみ有効
+        
+        printf("Leptrino sensor initialized successfully\n");
+    } else {
+        printf("Failed to initialize Leptrino sensor\n");
+    }
+}
 
 int main()
 {
@@ -288,6 +358,7 @@ int main()
     initSerial();
     initCanbus();
     rs422_init(460800, RS422_TXP_PIN);
+    init_leptrino_sensor();  // Leptrinoセンサ初期化を追加
 
     BaseType_t xReturnedMessageTranslator, xReturnedSubtask;
     TaskHandle_t xHandleMessageTranslator = NULL, xHandleSubtask = NULL;
