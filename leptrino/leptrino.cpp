@@ -3,13 +3,16 @@
 #include <algorithm>
 #include <cstring>
 
+extern "C" {
+  #include "../rs422/rs422_tx.h"
+}
+
 LeptrinoSensor::LeptrinoSensor(uart_inst_t* uart_inst, uint32_t baudrate, 
                                uint8_t tx_pin, uint8_t rx_pin)
     : uart_(uart_inst), baudrate_(baudrate), tx_pin_(tx_pin), rx_pin_(rx_pin),
       connected_(false), continuous_mode_(false), has_rating_(false), has_offset_(false),
       has_latest_rating_(false), has_latest_force_data_(false),
-      uart_rx_head_(0), uart_rx_tail_(0), uart_rx_count_(0),
-      packet_length_(0), packet_in_progress_(false) {
+      packet_length_(0), packet_state_(PACKET_STATE_IDLE), expected_packet_length_(0) {
     memset(&sensor_rating_, 0, sizeof(sensor_rating_));
     memset(&offset_data_, 0, sizeof(offset_data_));
     memset(&latest_sensor_rating_, 0, sizeof(latest_sensor_rating_));
@@ -25,11 +28,13 @@ bool LeptrinoSensor::connect() {
         return true;
     }
 
-    // UART初期化
+    // 送信RS422設定
+    rs422_init(baudrate_, tx_pin_);
+
+    // 受信UART初期化
     uart_init(uart_, baudrate_);
     
-    // ピン設定
-    gpio_set_function(tx_pin_, GPIO_FUNC_UART);
+    // 受信ピン設定
     gpio_set_function(rx_pin_, GPIO_FUNC_UART);
     
     // UART設定
@@ -38,7 +43,6 @@ bool LeptrinoSensor::connect() {
     uart_set_fifo_enabled(uart_, true);
 
     connected_ = true;
-    sleep_ms(100);  // 接続待機
     
     return true;
 }
@@ -56,51 +60,6 @@ void LeptrinoSensor::disconnect() {
     connected_ = false;
 }
 
-bool LeptrinoSensor::get_product_info(ProductInfo& info) {
-    if (!connected_) {
-        return false;
-    }
-
-    if (!send_command(CMD_PRODUCT_INFO)) {
-        return false;
-    }
-
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_));
-    if (response_len < 4) {
-        return false;
-    }
-
-    // 受信データ: RSV1 + CMD + RSV2 + DATA
-    const uint8_t* data_part = rx_buffer_ + 2;  // RSV1(1) + CMD(1) を除く
-    size_t data_len = response_len - 2;
-
-    if (data_len < 35) {  // 最小データサイズ
-        return false;
-    }
-
-    uint8_t status = data_part[0];  // RSV2（ステータス）
-    if (status != RESP_OK) {
-        return false;
-    }
-
-    // データ構造: STATUS(1) + 製品型式(16) + シリアル番号(8) + ファームウェア(4) + 出力レート(6)
-    const uint8_t* payload = data_part + 1;
-    
-    memcpy(info.product_name, payload, 16);
-    info.product_name[16] = '\0';
-    
-    memcpy(info.serial_number, payload + 16, 8);
-    info.serial_number[8] = '\0';
-    
-    memcpy(info.firmware_version, payload + 24, 4);
-    info.firmware_version[4] = '\0';
-    
-    memcpy(info.output_rate, payload + 28, 6);
-    info.output_rate[6] = '\0';
-
-    return true;
-}
-
 bool LeptrinoSensor::get_sensor_rating(SensorRatingData& rating) {
     if (!connected_) {
         return false;
@@ -110,39 +69,20 @@ bool LeptrinoSensor::get_sensor_rating(SensorRatingData& rating) {
         return false;
     }
 
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_));
-    if (response_len < 4) {
-        return false;
-    }
-
-    // 受信データ: RSV1 + CMD + RSV2 + DATA
-    const uint8_t* data_part = rx_buffer_ + 2;  // RSV1(1) + CMD(1) を除く
-    size_t data_len = response_len - 2;
-
-    if (data_len < 25) {  // 最小データサイズ: STATUS(1) + 6軸データ(4*6)
-        return false;
-    }
-
-    uint8_t status = data_part[0];  // RSV2（ステータス）
-    if (status != RESP_OK) {
-        return false;
-    }
-
-    // データ構造: STATUS(1) + Fx(4) + Fy(4) + Fz(4) + Mx(4) + My(4) + Mz(4)
-    const uint8_t* payload = data_part + 1;
+    // 割り込みで受信されるまで待機
+    uint32_t start_time = get_time_ms();
+    const uint32_t timeout_ms = 1000;
     
-    // Little-endianでfloat値を読み取り
-    memcpy(&rating.fx, payload, 4);
-    memcpy(&rating.fy, payload + 4, 4);
-    memcpy(&rating.fz, payload + 8, 4);
-    memcpy(&rating.mx, payload + 12, 4);
-    memcpy(&rating.my, payload + 16, 4);
-    memcpy(&rating.mz, payload + 20, 4);
-
-    sensor_rating_ = rating;
-    has_rating_ = true;
-
-    return true;
+    while ((get_time_ms() - start_time) < timeout_ms) {
+        if (has_latest_rating_) {
+            rating = latest_sensor_rating_;
+            has_latest_rating_ = false;  // フラグをクリア
+            return true;
+        }
+        sleep_ms(1);
+    }
+    
+    return false;
 }
 
 bool LeptrinoSensor::get_handshake_data(ForceData& data) {
@@ -154,12 +94,20 @@ bool LeptrinoSensor::get_handshake_data(ForceData& data) {
         return false;
     }
 
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_));
-    if (response_len == 0) {
-        return false;
+    // 割り込みで受信されるまで待機
+    uint32_t start_time = get_time_ms();
+    const uint32_t timeout_ms = 1000;
+    
+    while ((get_time_ms() - start_time) < timeout_ms) {
+        if (has_latest_force_data_) {
+            data = latest_force_data_;
+            has_latest_force_data_ = false;  // フラグをクリア
+            return true;
+        }
+        sleep_ms(1);
     }
-
-    return parse_force_data(rx_buffer_, response_len, data);
+    
+    return false;
 }
 
 bool LeptrinoSensor::start_continuous_mode() {
@@ -171,18 +119,10 @@ bool LeptrinoSensor::start_continuous_mode() {
         return false;
     }
 
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_));
-    if (response_len < 3) {
-        return false;
-    }
-
-    uint8_t status = rx_buffer_[2];  // RSV2（ステータス）
-    if (status == RESP_OK) {
-        continuous_mode_ = true;
-        return true;
-    }
-
-    return false;
+    // 成功応答の確認は割り込みで行われる
+    // 簡易的にコマンド送信成功で判定
+    continuous_mode_ = true;
+    return true;
 }
 
 bool LeptrinoSensor::stop_continuous_mode() {
@@ -194,31 +134,18 @@ bool LeptrinoSensor::stop_continuous_mode() {
         return false;
     }
 
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_));
-    if (response_len < 3) {
-        return false;
-    }
-
-    uint8_t status = rx_buffer_[2];  // RSV2（ステータス）
-    if (status == RESP_OK) {
-        continuous_mode_ = false;
-        return true;
-    }
-
-    return false;
+    // 成功応答の確認は割り込みで行われる
+    // 簡易的にコマンド送信成功で判定
+    continuous_mode_ = false;
+    return true;
 }
 
-bool LeptrinoSensor::get_continuous_data(ForceData& data, uint32_t timeout_ms) {
+bool LeptrinoSensor::get_continuous_data(ForceData& data) {
     if (!connected_ || !continuous_mode_ || !has_rating_) {
         return false;
     }
 
-    size_t response_len = receive_response(rx_buffer_, sizeof(rx_buffer_), timeout_ms);
-    if (response_len == 0) {
-        return false;
-    }
-
-    return parse_force_data(rx_buffer_, response_len, data);
+    return get_latest_force_data(data);
 }
 
 void LeptrinoSensor::set_offset(const ForceData& offset_data) {
@@ -315,83 +242,27 @@ bool LeptrinoSensor::send_command(uint8_t command, const uint8_t* data, size_t d
     tx_buffer_[packet_idx++] = bcc;
     
     // 送信
-    uart_write_blocking(uart_, tx_buffer_, packet_idx);
-    
+    rs422_puts((const char*)tx_buffer_, packet_idx);
+
     return true;
 }
 
-size_t LeptrinoSensor::receive_response(uint8_t* buffer, size_t buffer_size, uint32_t timeout_ms) {
-    if (!connected_) {
-        return 0;
+bool LeptrinoSensor::get_latest_force_data(ForceData& data) {
+    if (has_latest_force_data_) {
+        data = latest_force_data_;
+        has_latest_force_data_ = false;  // 読み取り後にフラグをクリア
+        return true;
     }
+    return false;
+}
 
-    uint32_t start_time = get_time_ms();
-    size_t packet_idx = 0;
-
-    // DLE待機
-    while (get_time_ms() - start_time < timeout_ms) {
-        if (uart_read_timeout(&buffer[packet_idx], 1, 10)) {
-            if (buffer[packet_idx] == DLE) {
-                packet_idx++;
-                break;
-            }
-        }
+bool LeptrinoSensor::get_latest_sensor_rating(SensorRatingData& rating) {
+    if (has_latest_rating_) {
+        rating = latest_sensor_rating_;
+        has_latest_rating_ = false;  // 読み取り後にフラグをクリア
+        return true;
     }
-
-    if (packet_idx == 0) {
-        return 0;  // DLE受信タイムアウト
-    }
-
-    // STX受信
-    if (!uart_read_timeout(&buffer[packet_idx], 1, timeout_ms - (get_time_ms() - start_time))) {
-        return 0;
-    }
-    if (buffer[packet_idx] != STX) {
-        return 0;
-    }
-    packet_idx++;
-
-    // LEN受信
-    if (!uart_read_timeout(&buffer[packet_idx], 1, timeout_ms - (get_time_ms() - start_time))) {
-        return 0;
-    }
-    uint8_t length = buffer[packet_idx];
-    packet_idx++;
-
-    // 残りのデータ受信 (RSV1 + CMD + RSV2 + DATA + DLE + ETX + BCC)
-    size_t remaining = length + 3;  // DATA + DLE + ETX + BCC
-    if (remaining > buffer_size - packet_idx) {
-        return 0;  // バッファオーバーフロー
-    }
-
-    size_t received = uart_read_timeout(&buffer[packet_idx], remaining, 
-                                       timeout_ms - (get_time_ms() - start_time));
-    if (received != remaining) {
-        return 0;
-    }
-    packet_idx += received;
-
-    // パケット検証
-    uint8_t dle2 = buffer[packet_idx - 3];
-    uint8_t etx = buffer[packet_idx - 2];
-    uint8_t received_bcc = buffer[packet_idx - 1];
-
-    if (dle2 != DLE || etx != ETX) {
-        return 0;
-    }
-
-    // BCC検証
-    uint8_t calculated_bcc = calculate_bcc(&buffer[2], packet_idx - 5);  // LEN から ETX まで（DLE除外）
-    if (calculated_bcc != received_bcc) {
-        return 0;
-    }
-
-    // RSV1 + CMD + RSV2 + DATA 部分を返す
-    size_t data_start = 3;  // DLE + STX + LEN をスキップ
-    size_t data_len = length;
-    memmove(buffer, &buffer[data_start], data_len);
-
-    return data_len;
+    return false;
 }
 
 bool LeptrinoSensor::parse_force_data(const uint8_t* data, size_t data_len, ForceData& force_data) {
@@ -470,112 +341,79 @@ void LeptrinoSensor::apply_offset_correction(ForceData& data) {
     }
 }
 
-size_t LeptrinoSensor::uart_read_timeout(uint8_t* buffer, size_t len, uint32_t timeout_ms) {
-    uint32_t start_time = get_time_ms();
-    size_t received = 0;
-
-    while (received < len && (get_time_ms() - start_time) < timeout_ms) {
-        if (uart_is_readable(uart_)) {
-            buffer[received++] = uart_getc(uart_);
-        } else {
-            sleep_ms(1);
-        }
-    }
-
-    return received;
-}
-
 uint32_t LeptrinoSensor::get_time_ms() {
     return to_ms_since_boot(get_absolute_time());
 }
 
 void LeptrinoSensor::on_uart_rx_interrupt(uint8_t byte) {
-    // リングバッファに1バイト追加（ノンブロッキング）
-    if (uart_rx_count_ < UART_RX_BUFFER_SIZE) {
-        uart_rx_buffer_[uart_rx_head_] = byte;
-        uart_rx_head_ = (uart_rx_head_ + 1) % UART_RX_BUFFER_SIZE;
-        uart_rx_count_++;
-    }
-    // バッファオーバーフローの場合、古いデータを破棄
-    else {
-        uart_rx_buffer_[uart_rx_head_] = byte;
-        uart_rx_head_ = (uart_rx_head_ + 1) % UART_RX_BUFFER_SIZE;
-        uart_rx_tail_ = (uart_rx_tail_ + 1) % UART_RX_BUFFER_SIZE;
-    }
-}
-
-bool LeptrinoSensor::has_complete_packet() {
-    // 受信バッファから完全なパケットを抽出を試行
-    uint8_t temp_packet[MAX_RESPONSE_SIZE];
-    size_t packet_size = extract_complete_packet(temp_packet, sizeof(temp_packet));
-    
-    if (packet_size > 0) {
-        // 完全なパケットが見つかった場合、デコードして内部データを更新
-        decode_and_update_data(temp_packet, packet_size);
-        return true;
-    }
-    
-    return false;
-}
-
-size_t LeptrinoSensor::extract_complete_packet(uint8_t* packet_data, size_t max_size) {
-    if (uart_rx_count_ < 4) {  // 最小パケットサイズ
-        return 0;
-    }
-    
-    size_t temp_tail = uart_rx_tail_;
-    size_t temp_count = uart_rx_count_;
-    size_t packet_idx = 0;
-    bool found_dle_stx = false;
-    uint8_t expected_length = 0;
-    
-    // DLE + STX を探す
-    while (temp_count > 0 && packet_idx < max_size - 1) {
-        uint8_t byte1 = uart_rx_buffer_[temp_tail];
-        temp_tail = (temp_tail + 1) % UART_RX_BUFFER_SIZE;
-        temp_count--;
-        
-        if (!found_dle_stx) {
-            if (byte1 == DLE && temp_count > 0) {
-                uint8_t byte2 = uart_rx_buffer_[temp_tail];
-                if (byte2 == STX) {
-                    packet_data[packet_idx++] = byte1;  // DLE
-                    packet_data[packet_idx++] = byte2;  // STX
-                    temp_tail = (temp_tail + 1) % UART_RX_BUFFER_SIZE;
-                    temp_count--;
-                    found_dle_stx = true;
-                }
+    switch (packet_state_) {
+        case PACKET_STATE_IDLE:
+            if (byte == DLE) {
+                packet_state_ = PACKET_STATE_DLE1;
+                packet_length_ = 0;
             }
-        } else {
-            packet_data[packet_idx++] = byte1;
+            break;
             
-            // LENを取得（DLE+STXの次のバイト）
-            if (packet_idx == 3) {
-                expected_length = byte1;
+        case PACKET_STATE_DLE1:
+            if (byte == STX) {
+                packet_state_ = PACKET_STATE_STX;
+                packet_buffer_[0] = DLE;
+                packet_buffer_[1] = STX;
+                packet_length_ = 2;
+            } else {
+                packet_state_ = PACKET_STATE_IDLE;
             }
+            break;
             
-            // 期待される長さに達したかチェック
-            if (packet_idx >= 3 && packet_idx >= (expected_length + 5)) {  // DLE+STX+LEN+DATA+DLE+ETX+BCC
-                // パケット完了の検証
-                if (packet_idx >= 5) {
-                    uint8_t dle2 = packet_data[packet_idx - 3];
-                    uint8_t etx = packet_data[packet_idx - 2];
-                    
-                    if (dle2 == DLE && etx == ETX) {
-                        // 完全なパケットが見つかった
-                        // リングバッファの読み取り位置を更新
-                        size_t consumed = uart_rx_count_ - temp_count;
-                        uart_rx_tail_ = (uart_rx_tail_ + consumed) % UART_RX_BUFFER_SIZE;
-                        uart_rx_count_ = temp_count;
-                        
-                        return packet_idx;
+        case PACKET_STATE_STX:
+            packet_buffer_[packet_length_++] = byte;
+            expected_packet_length_ = byte + 5; // LEN + DLE + STX + DATA + DLE + ETX + BCC
+            packet_state_ = PACKET_STATE_DATA;
+            break;
+            
+        case PACKET_STATE_DATA:
+            if (packet_length_ < MAX_RESPONSE_SIZE) {
+                packet_buffer_[packet_length_++] = byte;
+                
+                if (packet_length_ >= expected_packet_length_) {
+                    // パケット完了、検証を実行
+                    if (validate_and_decode_packet()) {
+                        // 有効なパケットが受信され、デコード完了
                     }
+                    packet_state_ = PACKET_STATE_IDLE;
                 }
+            } else {
+                // バッファオーバーフロー
+                packet_state_ = PACKET_STATE_IDLE;
             }
-        }
+            break;
+    }
+}
+
+bool LeptrinoSensor::validate_and_decode_packet() {
+    if (packet_length_ < 5) {
+        return false;
     }
     
-    return 0;  // 完全なパケットが見つからない
+    // DLE + ETX の確認
+    uint8_t dle2 = packet_buffer_[packet_length_ - 3];
+    uint8_t etx = packet_buffer_[packet_length_ - 2];
+    
+    if (dle2 != DLE || etx != ETX) {
+        return false;
+    }
+    
+    // BCC検証
+    uint8_t calculated_bcc = calculate_bcc(&packet_buffer_[2], packet_length_ - 5);
+    uint8_t received_bcc = packet_buffer_[packet_length_ - 1];
+    
+    if (calculated_bcc != received_bcc) {
+        return false;
+    }
+    
+    // 有効なパケット、デコード実行
+    decode_and_update_data(packet_buffer_, packet_length_);
+    return true;
 }
 
 void LeptrinoSensor::decode_and_update_data(const uint8_t* data, size_t data_len) {
@@ -680,20 +518,4 @@ void LeptrinoSensor::decode_and_update_data(const uint8_t* data, size_t data_len
             break;
         }
     }
-}
-
-bool LeptrinoSensor::get_latest_force_data(ForceData& data) {
-    if (has_latest_force_data_) {
-        data = latest_force_data_;
-        return true;
-    }
-    return false;
-}
-
-bool LeptrinoSensor::get_latest_sensor_rating(SensorRatingData& rating) {
-    if (has_latest_rating_) {
-        rating = latest_sensor_rating_;
-        return true;
-    }
-    return false;
 }

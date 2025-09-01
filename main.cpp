@@ -5,13 +5,12 @@
 #include "task.h"
 #include "Modbus.h"
 #include "hardware/pio.h"
-#include "leptrino.h"
+#include "leptrino/leptrino.h"
 #include "hardware/uart.h"
 
 extern "C" {
   #include "can2040.h"
   #include "hardware/irq.h"
-  #include "rs422_tx.h"
 }
 
 #define MODBUS_TX_PIN 0 
@@ -193,25 +192,20 @@ void vTaskMessageTranslator( void * pvParameters )
     int result = 0;
     for(;;)
     {
-        // Leptrinoセンサのデータ処理
-        if (g_leptrino_sensor && g_leptrino_sensor->has_complete_packet()) {
-            // パケットが完了したので、最新データを取得してModbusレジスタに格納
-            ForceData force_data;
-            if (g_leptrino_sensor->get_latest_force_data(force_data)) {
-                // float値をint16_t形式で格納（スケール調整）
-                ModbusDATA[REG_X_FORCE] = (int16_t)(force_data.fx * 100);  // X Force (0.01N単位)
-                ModbusDATA[REG_X_FORCE + 1] = (int16_t)(force_data.fx * 100) >> 16;
-                ModbusDATA[REG_Y_FORCE] = (int16_t)(force_data.fy * 100);  // Y Force
-                ModbusDATA[REG_Y_FORCE + 1] = (int16_t)(force_data.fy * 100) >> 16;
-                ModbusDATA[REG_Z_FORCE] = (int16_t)(force_data.fz * 100);  // Z Force
-                ModbusDATA[REG_Z_FORCE + 1] = (int16_t)(force_data.fz * 100) >> 16;
-                ModbusDATA[REG_X_TORQUE] = (int16_t)(force_data.mx * 1000); // X Torque (0.001Nm単位)
-                ModbusDATA[REG_X_TORQUE + 1] = (int16_t)(force_data.mx * 1000) >> 16;
-                ModbusDATA[REG_Y_TORQUE] = (int16_t)(force_data.my * 1000); // Y Torque
-                ModbusDATA[REG_Y_TORQUE + 1] = (int16_t)(force_data.my * 1000) >> 16;
-                ModbusDATA[REG_Z_TORQUE] = (int16_t)(force_data.mz * 1000); // Z Torque
-                ModbusDATA[REG_Z_TORQUE + 1] = (int16_t)(force_data.mz * 1000) >> 16;
-            }
+        ForceData force_data;
+        if (g_leptrino_sensor && g_leptrino_sensor->get_latest_force_data(force_data)) {
+            ModbusDATA[REG_X_FORCE] = (int16_t)(force_data.fx * 100);  // X Force (0.01N単位)
+            ModbusDATA[REG_X_FORCE + 1] = (int16_t)(force_data.fx * 100) >> 16;
+            ModbusDATA[REG_Y_FORCE] = (int16_t)(force_data.fy * 100);  // Y Force
+            ModbusDATA[REG_Y_FORCE + 1] = (int16_t)(force_data.fy * 100) >> 16;
+            ModbusDATA[REG_Z_FORCE] = (int16_t)(force_data.fz * 100);  // Z Force
+            ModbusDATA[REG_Z_FORCE + 1] = (int16_t)(force_data.fz * 100) >> 16;
+            ModbusDATA[REG_X_TORQUE] = (int16_t)(force_data.mx * 1000); // X Torque (0.001Nm単位)
+            ModbusDATA[REG_X_TORQUE + 1] = (int16_t)(force_data.mx * 1000) >> 16;
+            ModbusDATA[REG_Y_TORQUE] = (int16_t)(force_data.my * 1000); // Y Torque
+            ModbusDATA[REG_Y_TORQUE + 1] = (int16_t)(force_data.my * 1000) >> 16;
+            ModbusDATA[REG_Z_TORQUE] = (int16_t)(force_data.mz * 1000); // Z Torque
+            ModbusDATA[REG_Z_TORQUE + 1] = (int16_t)(force_data.mz * 1000) >> 16;
         }
         
         if(xSemaphoreTake(CanTxSphrHandle , 20) == pdTRUE){
@@ -340,7 +334,6 @@ void init_leptrino_sensor() {
     g_leptrino_sensor = new LeptrinoSensor(uart1, 460800, LEPTRINO_TX_PIN, LEPTRINO_RX_PIN);
     
     if (g_leptrino_sensor->connect()) {
-        // UART割り込み設定
         irq_set_exclusive_handler(UART1_IRQ, on_uart2_rx);
         irq_set_enabled(UART1_IRQ, true);
         uart_set_irq_enables(uart1, true, false);  // RX割り込みのみ有効
@@ -357,8 +350,7 @@ int main()
 
     initSerial();
     initCanbus();
-    rs422_init(460800, RS422_TXP_PIN);
-    init_leptrino_sensor();  // Leptrinoセンサ初期化を追加
+    init_leptrino_sensor();
 
     BaseType_t xReturnedMessageTranslator, xReturnedSubtask;
     TaskHandle_t xHandleMessageTranslator = NULL, xHandleSubtask = NULL;

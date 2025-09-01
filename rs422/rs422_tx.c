@@ -15,7 +15,7 @@ void rs422_init(unsigned int baudrate, unsigned int pin)
     rs422_tx_program_init(pio, sm, offset, pin, baudrate);
 }
 
-void rs422_puts(const char *str)
+void rs422_puts(const char *str, unsigned int len)
 {
-    rs422_tx_program_puts(pio, sm, str);
+    rs422_tx_program_puts(pio, sm, str, len);
 }

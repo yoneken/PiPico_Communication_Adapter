@@ -68,9 +68,9 @@ static inline void rs422_tx_program_putc(PIO pio, uint sm, char c) {
     pio_sm_put_blocking(pio, sm, (uint32_t)c);
 }
 
-static inline void rs422_tx_program_puts(PIO pio, uint sm, const char *s) {
-    while (*s)
-        rs422_tx_program_putc(pio, sm, *s++);
+static inline void rs422_tx_program_puts(PIO pio, uint sm, const char *s, uint len) {
+    for (uint i = 0; i < len; i++)
+        rs422_tx_program_putc(pio, sm, s[i]);
 }
 
 %}

@@ -28,7 +28,7 @@ int main() {
 
     printf("=== Leptrino力覚センサ割り込み受信テスト ===\n");
 
-    // Leptrinoセンサ初期化（UART1, TX=8, RX=9）
+    // Leptrinoセンサ初期化（UART1受信専用, RS422送信=8, UART受信=9）
     g_sensor = new LeptrinoSensor(uart1, 460800, 8, 9);
 
     if (!g_sensor->connect()) {

@@ -32,22 +32,11 @@ struct ForceData {
 };
 
 /**
- * @brief 製品情報構造体
- */
-struct ProductInfo {
-    char product_name[17];      // 製品名（NULL終端）
-    char serial_number[9];      // シリアル番号（NULL終端）
-    char firmware_version[5];   // ファームウェアバージョン（NULL終端）
-    char output_rate[7];        // 出力レート（NULL終端）
-};
-
-/**
  * @brief Leptrino力覚センサ通信クラス
  */
 class LeptrinoSensor {
 public:
     // コマンド定義
-    static const uint8_t CMD_PRODUCT_INFO = 0x2A;      // 製品情報取得
     static const uint8_t CMD_CHECK_RATING = 0x2B;      // 定格値確認
     static const uint8_t CMD_START_HANDSHAKE = 0x30;   // データ取得（ハンドシェイク）
     static const uint8_t CMD_START_CONTINUOUS = 0x32;  // データ送信開始（連続出力）
@@ -73,10 +62,10 @@ public:
 
     /**
      * @brief コンストラクタ
-     * @param uart_inst UART インスタンス
+     * @param uart_inst UART インスタンス（受信専用）
      * @param baudrate ボーレート
-     * @param tx_pin 送信ピン番号
-     * @param rx_pin 受信ピン番号
+     * @param tx_pin RS422送信ピン番号
+     * @param rx_pin UART受信ピン番号
      */
     LeptrinoSensor(uart_inst_t* uart_inst, uint32_t baudrate = 460800, 
                    uint8_t tx_pin = 0, uint8_t rx_pin = 1);
@@ -102,13 +91,6 @@ public:
      * @return 接続中の場合true
      */
     bool is_connected() const { return connected_; }
-
-    /**
-     * @brief 製品情報取得
-     * @param info 製品情報格納先
-     * @return 取得成功時true
-     */
-    bool get_product_info(ProductInfo& info);
 
     /**
      * @brief センサ定格値取得
@@ -137,12 +119,11 @@ public:
     bool stop_continuous_mode();
 
     /**
-     * @brief 連続出力データ取得（ポーリング）
+     * @brief 連続出力データ取得（割り込み方式）
      * @param data 力覚データ格納先
-     * @param timeout_ms タイムアウト時間[ms]
      * @return データ取得成功時true
      */
-    bool get_continuous_data(ForceData& data, uint32_t timeout_ms = 100);
+    bool get_continuous_data(ForceData& data);
 
     /**
      * @brief オフセット値を設定
@@ -181,12 +162,6 @@ public:
     void on_uart_rx_interrupt(uint8_t byte);
 
     /**
-     * @brief 受信バッファに完全なパケットが溜まっているかチェック
-     * @return 完全なパケットがある場合true
-     */
-    bool has_complete_packet();
-
-    /**
      * @brief 最新の力覚データ取得
      * @param data 力覚データ格納先
      * @return データが有効な場合true
@@ -220,18 +195,19 @@ private:
     bool has_latest_force_data_;
 
     uint8_t tx_buffer_[MAX_PACKET_SIZE];
-    uint8_t rx_buffer_[MAX_RESPONSE_SIZE];
     
-    // UART割り込み用受信バッファ
-    uint8_t uart_rx_buffer_[UART_RX_BUFFER_SIZE];
-    volatile size_t uart_rx_head_;
-    volatile size_t uart_rx_tail_;
-    volatile size_t uart_rx_count_;
-    
-    // パケット解析用
+    // パケット解析用状態管理
+    enum PacketState {
+        PACKET_STATE_IDLE,
+        PACKET_STATE_DLE1,
+        PACKET_STATE_STX,
+        PACKET_STATE_DATA
+    };
+
+    PacketState packet_state_;
     uint8_t packet_buffer_[MAX_RESPONSE_SIZE];
     size_t packet_length_;
-    bool packet_in_progress_;
+    size_t expected_packet_length_;
 
     /**
      * @brief コマンド送信
@@ -241,15 +217,6 @@ private:
      * @return 送信成功時true
      */
     bool send_command(uint8_t command, const uint8_t* data = nullptr, size_t data_len = 0);
-
-    /**
-     * @brief 応答受信
-     * @param buffer 受信バッファ
-     * @param buffer_size バッファサイズ
-     * @param timeout_ms タイムアウト時間[ms]
-     * @return 受信データ長（エラー時は0）
-     */
-    size_t receive_response(uint8_t* buffer, size_t buffer_size, uint32_t timeout_ms = 1000);
 
     /**
      * @brief 力覚データ解析
@@ -275,27 +242,16 @@ private:
     void apply_offset_correction(ForceData& data);
 
     /**
-     * @brief UARTデータ受信（タイムアウト付き）
-     * @param buffer 受信バッファ
-     * @param len 受信サイズ
-     * @param timeout_ms タイムアウト時間[ms]
-     * @return 実際に受信したサイズ
-     */
-    size_t uart_read_timeout(uint8_t* buffer, size_t len, uint32_t timeout_ms);
-
-    /**
      * @brief ミリ秒取得
      * @return 現在のミリ秒
      */
     uint32_t get_time_ms();
 
     /**
-     * @brief 受信バッファから完全なパケットを抽出
-     * @param packet_data パケットデータ格納先
-     * @param max_size 最大サイズ
-     * @return 抽出したパケットサイズ（0の場合は未完了）
+     * @brief パケット検証とデコード
+     * @return 検証成功時true
      */
-    size_t extract_complete_packet(uint8_t* packet_data, size_t max_size);
+    bool validate_and_decode_packet();
 
     /**
      * @brief メッセージデコードと内部データ更新
